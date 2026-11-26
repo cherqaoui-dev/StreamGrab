@@ -41,7 +41,34 @@ Install these yourself and leave them on your user or system PATH:
 
 The host does not bundle Deno or FFmpeg. After a successful update it prefers its own copy of yt-dlp at `%LOCALAPPDATA%\StreamGrab\yt-dlp.exe` and falls back to yt-dlp on PATH. That update downloads the official GitHub release over HTTPS and checks SHA-256. If the check fails, the installed binary stays and Settings shows a warning.
 
-The Windows package is unsigned.
+The Windows package is unsigned. The repository does not contain a ready-to-load extension or the host program. Both are built on the machine that will run them.
+
+## Set up on a Windows PC
+
+This repository is private. Setup needs access to https://github.com/cherqaoui-dev/StreamGrab, plus Node.js and Go 1.24 or newer.
+
+1. Clone the repository.
+2. Install yt-dlp, FFmpeg, and Deno 2.3 or newer, and leave them on the user or system PATH.
+3. Build the extension and the host, then register the host for the current user:
+
+```powershell
+cd extension
+npm install
+npm run build
+cd ..
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts\package-host.ps1
+powershell -NoProfile -ExecutionPolicy Bypass -File dist\windows\install.ps1
+```
+
+`install.ps1` does not ask for an administrator password. It copies the host into the user folder and registers it for Chrome and Firefox. If it prints that yt-dlp, FFmpeg, or Deno is missing, install that tool and run `install.ps1` again. Windows may warn that the host is unsigned.
+
+4. Quit Chrome completely, including the tray icon, so it sees Deno.
+5. Open `chrome://extensions`, turn on Developer mode, choose Load unpacked, and select `extension/.output/chrome-mv3`.
+6. Open a YouTube video and click the StreamGrab icon. **Get** saves the file in `Downloads\StreamGrab`.
+
+For Firefox, run `npm run build:firefox` inside `extension`, then load any file from `extension/.output/firefox-mv2` at `about:debugging` → This Firefox. That load is temporary and disappears when Firefox closes.
+
+If the popup says the companion is not connected, run `install.ps1` again and use Retry.
 
 ## Install the host
 
