@@ -6,6 +6,7 @@ const paths: Record<string, string> = {
   tune: "M4 7h16M4 17h16M8 7v0M16 17v0",
   video: "M4 7h11v10H4zM15 10l5-2v8l-5-2z",
   audio: "M5 10v4M9 7v10M13 9v6M17 5v14",
+  queue: "M4 7h16M4 12h16M4 17h10",
   history: "M4 12a8 8 0 1 0 2-5.3M4 4v5h5M12 8v5l3 2",
   folder: "M3 7h6l2 2h10v9H3z",
   pause: "M8 5v14M16 5v14",

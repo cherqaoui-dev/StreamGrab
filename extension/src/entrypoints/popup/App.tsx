@@ -183,9 +183,7 @@ export function App() {
               onClick={() => setTab(item)}
               onKeyDown={(event) => moveTab(event, item, setTab)}
             >
-              {item === "video" && <Icon name="video" />}
-              {item === "audio" && <Icon name="audio" />}
-              {item === "history" && <Icon name="history" />}
+              <Icon name={item} />
               <span>{label(item)}</span>
               {item === "queue" && queuedCount > 0 && <span class="badge">{queuedCount}</span>}
             </button>
@@ -245,6 +243,7 @@ export function App() {
                   onFocus={() => setSelected(index)}
                   onKeyDown={(event) => moveRow(event, index, rows.length, "data-get", setSelected)}
                 >
+                  <Icon name="download" />
                   Get
                 </button>
               </article>
@@ -299,6 +298,7 @@ export function App() {
                   onFocus={() => setAudioIndex(index)}
                   onKeyDown={(event) => moveRow(event, index, audioRows.length, "data-audio-index", setAudioIndex)}
                 >
+                  <Icon name="download" />
                   Get
                 </button>
               </article>
