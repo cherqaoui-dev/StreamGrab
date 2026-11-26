@@ -1,0 +1,705 @@
+<!DOCTYPE html><html lang="en" class="dark"><head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>StreamGrab — YouTube Video Downloader</title>
+  <script src="https://cdn.tailwindcss.com?plugins=forms,container-queries"></script>
+  <script id="tailwind-config" data-stitch-original-src="338359512a2669af===../../tailwind.config.js">/** @type {import('tailwindcss').Config} */
+globalThis.tailwind = globalThis.tailwind || {};
+globalThis.tailwind.config = {
+  darkMode: 'class',
+  theme: {
+    extend: {
+      colors: {
+        'accent': '#06B6D4',
+        'success': '#10B981',
+        'warning': '#F59E0B',
+        'error': '#EF4444',
+        'border': '#2A2A35',
+        'border-subtle': '#1F1F27',
+        'light-primary': '#D30026',
+        'light-on-primary': '#FFFFFF',
+        'light-surface': '#FFFFFF',
+        'light-on-surface': '#0F172A',
+        'light-surface-variant': '#F1F5F9',
+        'light-on-surface-variant': '#475569',
+        'dark-primary': '#FF1A47',
+        'dark-on-primary': '#1B1B1B',
+        'dark-surface': '#101015',
+        'dark-on-surface': '#F3F4F6',
+        'dark-surface-variant': '#1A1A22',
+        'dark-on-surface-variant': '#9CA3AF',
+      },
+      borderRadius: {
+        'sm': '4px',
+        'DEFAULT': '6px',
+        'md': '8px',
+        'lg': '12px',
+        'xl': '16px',
+        'full': '9999px',
+      },
+      spacing: {
+        'gutter-xs': '4px',
+        'gutter-sm': '8px',
+        'gutter-md': '12px',
+        'gutter-lg': '16px',
+        'gutter-xl': '20px',
+        'section': '24px',
+        'page-margin': '16px',
+      },
+      fontFamily: {
+        'display': ['"Space Grotesk"', 'sans-serif'],
+        'headline': ['"Space Grotesk"', 'sans-serif'],
+        'title': ['"Space Grotesk"', 'sans-serif'],
+        'body': ['"Geist"', 'sans-serif'],
+        'label': ['"Geist"', 'sans-serif'],
+        'code': ['"Space Mono"', 'monospace'],
+      },
+      fontSize: {
+        'display-lg': ['28px', { lineHeight: '34px', letterSpacing: '-0.5px', fontWeight: '700' }],
+        'display-lg-mobile': ['22px', { lineHeight: '28px', letterSpacing: '-0.25px', fontWeight: '700' }],
+        'headline-lg': ['20px', { lineHeight: '26px', letterSpacing: '-0.2px', fontWeight: '600' }],
+        'headline-lg-mobile': ['18px', { lineHeight: '24px', fontWeight: '600' }],
+        'title-md': ['15px', { lineHeight: '20px', fontWeight: '600' }],
+        'title-sm': ['13px', { lineHeight: '18px', fontWeight: '600' }],
+        'body-md': ['13px', { lineHeight: '18px', fontWeight: '400' }],
+        'body-sm': ['12px', { lineHeight: '16px', fontWeight: '400' }],
+        'label-sm': ['11px', { lineHeight: '14px', fontWeight: '500' }],
+        'code-sm': ['11px', { lineHeight: '14px', fontWeight: '400' }],
+      },
+      transitionDuration: {
+        'state-change': '120ms',
+        'dropdown-expand': '180ms',
+      },
+      transitionDelay: {
+        'state-change': '0ms',
+        'dropdown-expand': '0ms',
+      },
+      transitionTimingFunction: {
+        'state-change': 'cubic-bezier(0.16, 1, 0.3, 1)',
+        'dropdown-expand': 'cubic-bezier(0.16, 1, 0.3, 1)',
+      },
+    },
+  },
+};
+if (typeof module !== 'undefined') module.exports = globalThis.tailwind.config;
+</script>
+  <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&amp;family=Geist:wght@400;500;600&amp;family=Space+Mono&amp;display=swap" rel="stylesheet">
+  <link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&amp;display=block" rel="stylesheet">
+  <style>
+    .material-symbols-outlined {
+      display: inline-block;
+      width: 1em;
+      height: 1em;
+      line-height: 1 !important;
+      box-sizing: content-box;
+      overflow: hidden;
+      white-space: nowrap;
+      direction: ltr;
+      vertical-align: middle;
+    }
+    ::-webkit-scrollbar {
+      width: 4px;
+    }
+    ::-webkit-scrollbar-track {
+      background: #101015;
+    }
+    ::-webkit-scrollbar-thumb {
+      background: #2A2A35;
+      border-radius: 9999px;
+    }
+  </style>
+</head>
+<body class="bg-dark-surface text-dark-on-surface font-body antialiased min-h-screen flex flex-col selection:bg-dark-primary selection:text-dark-on-primary">
+
+  <!-- Outer Browser Extension Shell Container -->
+  <div class="w-full flex-1 flex flex-col bg-dark-surface border-x border-border max-w-[420px] mx-auto min-h-screen">
+    
+    <!-- Top Extension Header -->
+    <header class="sticky top-0 z-20 bg-dark-surface px-page-margin py-3 border-b border-border flex items-center justify-between">
+      <div class="flex items-center gap-2">
+        <div class="w-7 h-7 rounded-md bg-dark-primary flex items-center justify-center text-dark-on-primary shadow-sm shadow-dark-primary/30">
+          <span class="material-symbols-outlined text-[17px]">download_for_offline</span>
+        </div>
+        <div>
+          <div class="flex items-center gap-1.5">
+            <h1 class="font-headline text-title-sm text-dark-on-surface leading-tight tracking-tight">StreamGrab</h1>
+            <span class="inline-flex items-center px-1 rounded text-[9px] font-code bg-dark-surface-variant text-accent border border-border-subtle">PRO</span>
+          </div>
+          <p class="text-[10px] font-code text-dark-on-surface-variant leading-none mt-0.5">v2.4.1 • yt-dlp core</p>
+        </div>
+      </div>
+
+      <!-- Quick Actions -->
+      <div class="flex items-center gap-1">
+        <button type="button" data-component-id="button-icon" data-component-type="button" data-component-variant="icon" class="w-7 h-7 inline-flex items-center justify-center rounded text-dark-on-surface-variant hover:text-dark-on-surface hover:bg-dark-surface-variant border border-transparent hover:border-border transition-colors duration-state-change" title="Direct Stream Link Copied" aria-label="Copy direct stream link">
+          <span class="material-symbols-outlined text-[16px]">link</span>
+        </button>
+        <button type="button" data-component-id="button-icon" data-component-type="button" data-component-variant="icon" class="w-7 h-7 inline-flex items-center justify-center rounded text-dark-on-surface-variant hover:text-dark-on-surface hover:bg-dark-surface-variant border border-transparent hover:border-border transition-colors duration-state-change" title="Extension Settings &amp; Codec Defaults" aria-label="Settings">
+          <span class="material-symbols-outlined text-[16px]">tune</span>
+        </button>
+      </div>
+    </header>
+
+    <!-- Main Content Area -->
+    <main class="flex-1 px-page-margin py-3 flex flex-col gap-3">
+
+      <!-- Active Video Detection Card -->
+      <section data-component-id="card-elevated" data-component-type="card" data-component-variant="elevated" class="bg-dark-surface-variant border border-border rounded-lg p-2.5 flex gap-2.5 items-start relative group">
+        <div class="relative w-28 h-16 rounded bg-black shrink-0 overflow-hidden border border-border-subtle">
+          <img src="https://lh3.googleusercontent.com/aida/ALJJyrAlb47qqZPBVhf0AWa0micNFcTfDpwwErQM0fUGm4eAKiy9SWbozdDjzgKHAXl82Q05NxbfmzzBRKdeKUBS4H8Dyes7GVbUC4olKsESy9KFrhGas919N9U8__TLV6jbZYl6HYj04LnPZim6Jo7kwCF3TIV6Hnnx3Au6R8NY4zMgS2OUpwRZQuEUeGAh3G8I2f3IWJrGPW9HwR1kCDQ2zMwx1iIFBDfia2GEswbvzIrrRezxhGUXDhuZWRc25RB1-4iP" alt="Detected YouTube Video Thumbnail" class="w-full h-full object-cover group-hover:scale-105 transition-transform duration-300" data-stitch-original-src="7557a92d7ded829d===../../images/yt_thumb_lofi.jpg">
+          <span class="absolute bottom-1 right-1 bg-black/85 text-[9px] font-code px-1 rounded text-white tracking-wide">38:42</span>
+          <!-- Live pulse chip -->
+          <span class="absolute top-1 left-1 w-2 h-2 rounded-full bg-success ring-2 ring-black animate-pulse" title="Active YouTube Tab Detected"></span>
+        </div>
+
+        <div class="flex-1 min-w-0 flex flex-col justify-between h-16">
+          <div>
+            <h2 class="font-headline text-title-sm text-dark-on-surface line-clamp-2 leading-tight">
+              Midnight Lo-Fi Beats • Rainy Tokyo Cyberpunk Session 2026
+            </h2>
+            <p class="text-[11px] text-dark-on-surface-variant truncate mt-0.5">
+              ChillHop Lab • 840K views
+            </p>
+          </div>
+          
+          <div class="flex items-center gap-1.5">
+            <span class="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-code bg-border text-dark-on-surface font-bold">
+              4K 60FPS
+            </span>
+            <span class="text-[10px] font-code text-dark-on-surface-variant">
+              HDR • AV1
+            </span>
+            <span class="text-[10px] font-code text-accent ml-auto">
+              Opus 160k
+            </span>
+          </div>
+        </div>
+      </section>
+
+      <!-- Mode Tabs Navigation -->
+      <nav data-component-id="tabs-horizontal" data-component-type="tabs" data-component-variant="horizontal" class="w-full">
+        <div role="tablist" aria-label="Media format modes" class="grid grid-cols-4 p-1 bg-dark-surface-variant rounded-lg border border-border">
+          <button role="tab" id="tab-video" aria-selected="false" aria-controls="panel-video" tabindex="-1" class="py-1 px-1.5 text-center rounded-md font-headline text-title-sm font-semibold text-dark-on-surface-variant hover:text-dark-on-surface transition-all duration-state-change flex items-center justify-center gap-1">
+            <span class="material-symbols-outlined text-[14px] text-dark-primary">videocam</span>
+            <span>Video</span>
+          </button>
+
+          <button role="tab" id="tab-audio" aria-selected="false" aria-controls="panel-audio" tabindex="-1" class="py-1 px-1.5 text-center rounded-md font-headline text-title-sm font-semibold text-dark-on-surface-variant hover:text-dark-on-surface transition-all duration-state-change flex items-center justify-center gap-1">
+            <span class="material-symbols-outlined text-[14px] text-accent">graphic_eq</span>
+            <span>Audio</span>
+          </button>
+
+          <button role="tab" id="tab-queue" aria-selected="true" aria-controls="panel-queue" tabindex="0" class="py-1 px-1.5 text-center rounded-md font-headline text-title-sm font-semibold transition-all duration-state-change bg-dark-surface text-dark-on-surface shadow-sm border border-border/60 flex items-center justify-center gap-1">
+            <span>Queue</span>
+            <span class="w-4 h-4 rounded-full bg-border text-dark-on-surface text-[9px] font-code flex items-center justify-center font-bold">1</span>
+          </button>
+
+          <button role="tab" id="tab-history" aria-selected="false" aria-controls="panel-history" tabindex="-1" class="py-1 px-1.5 text-center rounded-md font-headline text-title-sm font-semibold text-dark-on-surface-variant hover:text-dark-on-surface transition-all duration-state-change flex items-center justify-center gap-1">
+            <span class="material-symbols-outlined text-[14px]">history</span>
+            <span>History</span>
+          </button>
+        </div>
+      </nav>
+
+      <!-- Video Streams List Panel -->
+      <section id="panel-video" role="tabpanel" aria-labelledby="tab-video" class="hidden flex-col gap-2">
+        <div class="flex items-center justify-between px-0.5">
+          <span class="text-[11px] font-code uppercase tracking-wider text-dark-on-surface-variant">Available Stream Qualities</span>
+          <div class="flex items-center gap-1 text-[11px] font-code text-dark-on-surface-variant">
+            <span>Container:</span>
+            <button type="button" class="text-dark-on-surface hover:text-accent underline decoration-dotted font-bold truncate max-w-[100px]">MP4 Muxed</button>
+          </div>
+        </div>
+
+        <!-- Tier 1: 4K UHD 60fps -->
+        <article data-component-id="card-action" data-component-type="card" data-component-variant="action" class="bg-dark-surface-variant border border-border rounded-md px-3 py-2 flex items-center justify-between transition-colors relative overflow-hidden">
+          <div class="flex items-center gap-2.5">
+            <div class="w-7 h-7 rounded bg-border text-dark-on-surface flex items-center justify-center shrink-0">
+              <span class="material-symbols-outlined text-[16px]" data-original-icon="high_definition">circle</span>
+            </div>
+            <div>
+              <div class="flex items-center gap-1.5">
+                <span class="font-headline text-title-sm font-semibold text-dark-on-surface">2160p 4K UHD</span>
+                <span class="font-code text-[9px] px-1 bg-border text-dark-on-surface rounded font-bold">60fps</span>
+                <span class="font-code text-[9px] px-1 bg-border text-dark-on-surface-variant rounded">HDR</span>
+              </div>
+              <p class="font-code text-[11px] text-dark-on-surface-variant mt-0.5">
+                AV1 / Opus • ~1.42 GB
+              </p>
+            </div>
+          </div>
+          <footer>
+            <button type="button" class="px-2.5 py-1.5 bg-dark-primary hover:brightness-110 active:scale-95 text-dark-on-primary font-headline text-[12px] font-bold rounded flex items-center gap-1 transition-all shadow-sm">
+              <span class="material-symbols-outlined text-[14px]">download</span>
+              <span>Get</span>
+            </button>
+          </footer>
+        </article>
+
+        <!-- Tier 2: 1440p QHD 60fps -->
+        <article data-component-id="card-action" data-component-type="card" data-component-variant="action" class="bg-dark-surface-variant border border-border rounded-md px-3 py-2 flex items-center justify-between transition-colors">
+          <div class="flex items-center gap-2.5">
+            <div class="w-7 h-7 rounded bg-border flex items-center justify-center text-dark-on-surface shrink-0">
+              <span class="material-symbols-outlined text-[16px]">hd</span>
+            </div>
+            <div>
+              <div class="flex items-center gap-1.5">
+                <span class="font-headline text-title-sm font-semibold text-dark-on-surface">1440p 2K QHD</span>
+                <span class="font-code text-[9px] px-1 bg-border text-dark-on-surface-variant rounded">60fps</span>
+              </div>
+              <p class="font-code text-[11px] text-dark-on-surface-variant mt-0.5">
+                VP9 / AAC • ~780 MB
+              </p>
+            </div>
+          </div>
+          <footer>
+            <button type="button" class="px-2.5 py-1.5 bg-dark-surface hover:bg-border text-dark-on-surface font-headline text-[12px] font-medium rounded border border-border flex items-center gap-1 transition-all">
+              <span class="material-symbols-outlined text-[14px]">download</span>
+              <span>Get</span>
+            </button>
+          </footer>
+        </article>
+
+        <!-- Tier 3: 1080p FHD 60fps (Recommended / Compatible) -->
+        <article data-component-id="card-action" data-component-type="card" data-component-variant="action" class="bg-dark-surface-variant border border-border rounded-md px-3 py-2 flex items-center justify-between transition-colors">
+          <div class="flex items-center gap-2.5">
+            <div class="w-7 h-7 rounded bg-border flex items-center justify-center text-dark-on-surface shrink-0">
+              <span class="material-symbols-outlined text-[16px]">hd</span>
+            </div>
+            <div>
+              <div class="flex items-center gap-1.5">
+                <span class="font-headline text-title-sm font-semibold text-dark-on-surface">1080p Full HD</span>
+                <span class="font-code text-[9px] px-1 bg-border text-dark-on-surface-variant rounded">60fps</span>
+                <span class="font-code text-[9px] px-1 bg-border text-success rounded font-semibold">Fastest</span>
+              </div>
+              <p class="font-code text-[11px] text-dark-on-surface-variant mt-0.5">
+                H.264 / AAC • ~345 MB
+              </p>
+            </div>
+          </div>
+          <footer>
+            <button type="button" class="px-2.5 py-1.5 bg-dark-surface hover:bg-border text-dark-on-surface font-headline text-[12px] font-medium rounded border border-border flex items-center gap-1 transition-all">
+              <span class="material-symbols-outlined text-[14px]">download</span>
+              <span>Get</span>
+            </button>
+          </footer>
+        </article>
+
+        <!-- Tier 4: 720p HD -->
+        <article data-component-id="card-action" data-component-type="card" data-component-variant="action" class="bg-dark-surface-variant border border-border rounded-md px-3 py-2 flex items-center justify-between transition-colors">
+          <div class="flex items-center gap-2.5">
+            <div class="w-7 h-7 rounded bg-border flex items-center justify-center text-dark-on-surface-variant shrink-0">
+              <span class="material-symbols-outlined text-[16px]">movie</span>
+            </div>
+            <div>
+              <div class="flex items-center gap-1.5">
+                <span class="font-headline text-title-sm font-semibold text-dark-on-surface">720p Standard HD</span>
+              </div>
+              <p class="font-code text-[11px] text-dark-on-surface-variant mt-0.5">
+                H.264 / AAC • ~160 MB
+              </p>
+            </div>
+          </div>
+          <footer>
+            <button type="button" class="px-2.5 py-1.5 bg-dark-surface hover:bg-border text-dark-on-surface font-headline text-[12px] font-medium rounded border border-border flex items-center gap-1 transition-all">
+              <span class="material-symbols-outlined text-[14px]">download</span>
+              <span>Get</span>
+            </button>
+          </footer>
+        </article>
+      </section>
+
+      <!-- Audio Extraction Panel -->
+      <section id="panel-audio" role="tabpanel" aria-labelledby="tab-audio" class="hidden flex-col gap-2">
+        <div class="flex items-center justify-between px-0.5">
+          <span class="text-[11px] font-code uppercase tracking-wider text-dark-on-surface-variant">Audio Extraction</span>
+          <div class="flex items-center gap-1 text-[11px] font-code text-dark-on-surface-variant">
+            <span>Tags:</span>
+            <span class="text-accent font-bold">ID3 + Cover</span>
+          </div>
+        </div>
+
+        <!-- Audio Tier 1: FLAC Lossless -->
+        <article data-component-id="card-action" data-component-type="card" data-component-variant="action" class="bg-dark-surface-variant border border-border rounded-md px-3 py-2 flex items-center justify-between transition-colors">
+          <div class="flex items-center gap-2.5">
+            <div class="w-7 h-7 rounded bg-border text-accent flex items-center justify-center shrink-0">
+              <span class="material-symbols-outlined text-[16px]">graphic_eq</span>
+            </div>
+            <div>
+              <div class="flex items-center gap-1.5">
+                <span class="font-headline text-title-sm font-semibold text-dark-on-surface">FLAC Lossless</span>
+                <span class="font-code text-[9px] px-1 bg-border text-accent rounded font-bold">24-bit</span>
+              </div>
+              <p class="font-code text-[11px] text-dark-on-surface-variant mt-0.5">
+                48 kHz Stereo • ~218 MB
+              </p>
+            </div>
+          </div>
+          <footer>
+            <button type="button" class="px-2.5 py-1.5 bg-dark-primary hover:brightness-110 active:scale-95 text-dark-on-primary font-headline text-[12px] font-bold rounded flex items-center gap-1 transition-all shadow-sm">
+              <span class="material-symbols-outlined text-[14px]">download</span>
+              <span>Get</span>
+            </button>
+          </footer>
+        </article>
+
+        <!-- Audio Tier 2: MP3 320kbps -->
+        <article data-component-id="card-action" data-component-type="card" data-component-variant="action" class="bg-dark-surface-variant border border-border rounded-md px-3 py-2 flex items-center justify-between transition-colors">
+          <div class="flex items-center gap-2.5">
+            <div class="w-7 h-7 rounded bg-border text-dark-on-surface flex items-center justify-center shrink-0">
+              <span class="material-symbols-outlined text-[16px]">music_note</span>
+            </div>
+            <div>
+              <div class="flex items-center gap-1.5">
+                <span class="font-headline text-title-sm font-semibold text-dark-on-surface">MP3 High Quality</span>
+                <span class="font-code text-[9px] px-1 bg-border text-success rounded font-semibold">Best</span>
+              </div>
+              <p class="font-code text-[11px] text-dark-on-surface-variant mt-0.5">
+                320 kbps CBR • ~88 MB
+              </p>
+            </div>
+          </div>
+          <footer>
+            <button type="button" class="px-2.5 py-1.5 bg-dark-surface hover:bg-border text-dark-on-surface font-headline text-[12px] font-medium rounded border border-border flex items-center gap-1 transition-all">
+              <span class="material-symbols-outlined text-[14px]">download</span>
+              <span>Get</span>
+            </button>
+          </footer>
+        </article>
+
+        <!-- Audio Tier 3: Opus Native -->
+        <article data-component-id="card-action" data-component-type="card" data-component-variant="action" class="bg-dark-surface-variant border border-border rounded-md px-3 py-2 flex items-center justify-between transition-colors">
+          <div class="flex items-center gap-2.5">
+            <div class="w-7 h-7 rounded bg-border text-dark-on-surface flex items-center justify-center shrink-0">
+              <span class="material-symbols-outlined text-[16px]">audio_file</span>
+            </div>
+            <div>
+              <div class="flex items-center gap-1.5">
+                <span class="font-headline text-title-sm font-semibold text-dark-on-surface">Opus Native</span>
+                <span class="font-code text-[9px] px-1 bg-border text-dark-on-surface-variant rounded">Direct</span>
+              </div>
+              <p class="font-code text-[11px] text-dark-on-surface-variant mt-0.5">
+                160 kbps WebM • ~44 MB
+              </p>
+            </div>
+          </div>
+          <footer>
+            <button type="button" class="px-2.5 py-1.5 bg-dark-surface hover:bg-border text-dark-on-surface font-headline text-[12px] font-medium rounded border border-border flex items-center gap-1 transition-all">
+              <span class="material-symbols-outlined text-[14px]">download</span>
+              <span>Get</span>
+            </button>
+          </footer>
+        </article>
+
+        <!-- Audio Tier 4: AAC M4A -->
+        <article data-component-id="card-action" data-component-type="card" data-component-variant="action" class="bg-dark-surface-variant border border-border rounded-md px-3 py-2 flex items-center justify-between transition-colors">
+          <div class="flex items-center gap-2.5">
+            <div class="w-7 h-7 rounded bg-border text-dark-on-surface-variant flex items-center justify-center shrink-0">
+              <span class="material-symbols-outlined text-[16px]">headphones</span>
+            </div>
+            <div>
+              <div class="flex items-center gap-1.5">
+                <span class="font-headline text-title-sm font-semibold text-dark-on-surface">M4A / AAC</span>
+              </div>
+              <p class="font-code text-[11px] text-dark-on-surface-variant mt-0.5">
+                256 kbps VBR • ~71 MB
+              </p>
+            </div>
+          </div>
+          <footer>
+            <button type="button" class="px-2.5 py-1.5 bg-dark-surface hover:bg-border text-dark-on-surface font-headline text-[12px] font-medium rounded border border-border flex items-center gap-1 transition-all">
+              <span class="material-symbols-outlined text-[14px]">download</span>
+              <span>Get</span>
+            </button>
+          </footer>
+        </article>
+      </section>
+
+      <!-- Download History Panel -->
+      <section id="panel-history" role="tabpanel" aria-labelledby="tab-history" class="hidden flex-col gap-2">
+        <div class="flex items-center justify-between px-0.5">
+          <span class="text-[11px] font-code uppercase tracking-wider text-dark-on-surface-variant">Recent Downloads (4)</span>
+          <button type="button" class="text-[11px] font-code text-dark-on-surface-variant hover:text-dark-on-surface underline decoration-dotted">Clear All</button>
+        </div>
+
+        <!-- History Item 1 -->
+        <article data-component-id="card-action" data-component-type="card" data-component-variant="action" class="bg-dark-surface-variant border border-border rounded-md px-3 py-2 flex items-center justify-between transition-colors">
+          <div class="flex items-center gap-2.5 min-w-0">
+            <div class="w-7 h-7 rounded bg-border text-success flex items-center justify-center shrink-0">
+              <span class="material-symbols-outlined text-[16px]">check_circle</span>
+            </div>
+            <div class="min-w-0">
+              <div class="flex items-center gap-1.5">
+                <span class="font-headline text-title-sm font-semibold text-dark-on-surface truncate">Tokyo_Neon_Drive_1080p.mp4</span>
+              </div>
+              <p class="font-code text-[11px] text-dark-on-surface-variant mt-0.5">
+                1080p H.264 • 345 MB • 12m ago
+              </p>
+            </div>
+          </div>
+          <footer class="flex items-center gap-1 shrink-0">
+            <button type="button" aria-label="Open folder" title="Show in folder" class="w-7 h-7 rounded bg-dark-surface hover:bg-border text-dark-on-surface border border-border flex items-center justify-center transition-colors">
+              <span class="material-symbols-outlined text-[15px]">folder_open</span>
+            </button>
+          </footer>
+        </article>
+
+        <!-- History Item 2 -->
+        <article data-component-id="card-action" data-component-type="card" data-component-variant="action" class="bg-dark-surface-variant border border-border rounded-md px-3 py-2 flex items-center justify-between transition-colors">
+          <div class="flex items-center gap-2.5 min-w-0">
+            <div class="w-7 h-7 rounded bg-border text-accent flex items-center justify-center shrink-0">
+              <span class="material-symbols-outlined text-[16px]">music_note</span>
+            </div>
+            <div class="min-w-0">
+              <div class="flex items-center gap-1.5">
+                <span class="font-headline text-title-sm font-semibold text-dark-on-surface truncate">Midnight_LoFi_Beats_320k.mp3</span>
+              </div>
+              <p class="font-code text-[11px] text-dark-on-surface-variant mt-0.5">
+                MP3 320 kbps • 88 MB • 1h ago
+              </p>
+            </div>
+          </div>
+          <footer class="flex items-center gap-1 shrink-0">
+            <button type="button" aria-label="Open folder" title="Show in folder" class="w-7 h-7 rounded bg-dark-surface hover:bg-border text-dark-on-surface border border-border flex items-center justify-center transition-colors">
+              <span class="material-symbols-outlined text-[15px]">folder_open</span>
+            </button>
+          </footer>
+        </article>
+
+        <!-- History Item 3 -->
+        <article data-component-id="card-action" data-component-type="card" data-component-variant="action" class="bg-dark-surface-variant border border-border rounded-md px-3 py-2 flex items-center justify-between transition-colors">
+          <div class="flex items-center gap-2.5 min-w-0">
+            <div class="w-7 h-7 rounded bg-border text-success flex items-center justify-center shrink-0">
+              <span class="material-symbols-outlined text-[16px]" data-original-icon="high_definition">circle</span>
+            </div>
+            <div class="min-w-0">
+              <div class="flex items-center gap-1.5">
+                <span class="font-headline text-title-sm font-semibold text-dark-on-surface truncate">Cyberpunk_Tokyo_Teaser_4K.mp4</span>
+              </div>
+              <p class="font-code text-[11px] text-dark-on-surface-variant mt-0.5">
+                4K AV1 • 612 MB • Yesterday
+              </p>
+            </div>
+          </div>
+          <footer class="flex items-center gap-1 shrink-0">
+            <button type="button" aria-label="Open folder" title="Show in folder" class="w-7 h-7 rounded bg-dark-surface hover:bg-border text-dark-on-surface border border-border flex items-center justify-center transition-colors">
+              <span class="material-symbols-outlined text-[15px]">folder_open</span>
+            </button>
+          </footer>
+        </article>
+
+        <!-- History Item 4 -->
+        <article data-component-id="card-action" data-component-type="card" data-component-variant="action" class="bg-dark-surface-variant border border-border rounded-md px-3 py-2 flex items-center justify-between transition-colors">
+          <div class="flex items-center gap-2.5 min-w-0">
+            <div class="w-7 h-7 rounded bg-border text-dark-on-surface-variant flex items-center justify-center shrink-0">
+              <span class="material-symbols-outlined text-[16px]">audio_file</span>
+            </div>
+            <div class="min-w-0">
+              <div class="flex items-center gap-1.5">
+                <span class="font-headline text-title-sm font-semibold text-dark-on-surface truncate">Synthwave_Mix_2026_Opus.webm</span>
+              </div>
+              <p class="font-code text-[11px] text-dark-on-surface-variant mt-0.5">
+                Opus 160 kbps • 44 MB • 2d ago
+              </p>
+            </div>
+          </div>
+          <footer class="flex items-center gap-1 shrink-0">
+            <button type="button" aria-label="Open folder" title="Show in folder" class="w-7 h-7 rounded bg-dark-surface hover:bg-border text-dark-on-surface border border-border flex items-center justify-center transition-colors">
+              <span class="material-symbols-outlined text-[15px]">folder_open</span>
+            </button>
+          </footer>
+        </article>
+      </section>
+
+      <!-- Download Queue Panel -->
+      <section id="panel-queue" role="tabpanel" aria-labelledby="tab-queue" class="flex flex-col gap-2">
+        <div class="flex items-center justify-between px-0.5">
+          <span class="text-[11px] font-code uppercase tracking-wider text-dark-on-surface-variant">Batch Queue (3)</span>
+          <button type="button" class="text-[11px] font-code text-dark-on-surface-variant hover:text-dark-on-surface underline decoration-dotted">Clear Done</button>
+        </div>
+
+        <!-- Queue Item 1: Downloading -->
+        <article data-component-id="card-interactive" data-component-type="card" data-component-variant="interactive" class="bg-dark-surface-variant border border-accent/40 rounded-lg p-2.5">
+          <div class="flex items-start justify-between gap-2 mb-1.5">
+            <div class="min-w-0 flex-1">
+              <div class="flex items-center gap-1.5">
+                <span class="material-symbols-outlined text-[14px] text-accent">downloading</span>
+                <h3 class="font-headline text-title-sm font-semibold text-dark-on-surface truncate">
+                  Cyberpunk_Rain_Tokyo_Ambient_4K.mp4
+                </h3>
+              </div>
+              <p class="font-code text-[11px] text-dark-on-surface-variant mt-0.5">
+                <span class="text-accent font-bold">74%</span> • 1.05 / 1.42 GB • 18.4 MB/s
+              </p>
+            </div>
+            <button type="button" aria-label="Pause" class="w-6 h-6 rounded flex items-center justify-center text-dark-on-surface-variant hover:text-dark-on-surface hover:bg-border">
+              <span class="material-symbols-outlined text-[14px]">pause</span>
+            </button>
+          </div>
+          <div class="w-full h-1 bg-dark-surface rounded-full overflow-hidden">
+            <div class="h-full bg-accent rounded-full" style="width: 74%;"></div>
+          </div>
+        </article>
+
+        <!-- Queue Item 2: Queued -->
+        <article data-component-id="card-action" data-component-type="card" data-component-variant="action" class="bg-dark-surface-variant border border-border rounded-md px-3 py-2 flex items-center justify-between">
+          <div class="flex items-center gap-2.5 min-w-0">
+            <div class="w-7 h-7 rounded bg-border text-warning flex items-center justify-center shrink-0">
+              <span class="material-symbols-outlined text-[16px]">schedule</span>
+            </div>
+            <div class="min-w-0">
+              <p class="font-headline text-title-sm font-semibold text-dark-on-surface truncate">Midnight_LoFi_Beats.mp3</p>
+              <p class="font-code text-[11px] text-dark-on-surface-variant mt-0.5">Queued • 320 kbps • ~88 MB</p>
+            </div>
+          </div>
+          <button type="button" aria-label="Remove from queue" class="w-6 h-6 rounded flex items-center justify-center text-dark-on-surface-variant hover:text-error hover:bg-border shrink-0">
+            <span class="material-symbols-outlined text-[14px]">close</span>
+          </button>
+        </article>
+
+        <!-- Queue Item 3: Completed -->
+        <article data-component-id="card-action" data-component-type="card" data-component-variant="action" class="bg-dark-surface-variant border border-border rounded-md px-3 py-2 flex items-center justify-between">
+          <div class="flex items-center gap-2.5 min-w-0">
+            <div class="w-7 h-7 rounded bg-border text-success flex items-center justify-center shrink-0">
+              <span class="material-symbols-outlined text-[16px]">check_circle</span>
+            </div>
+            <div class="min-w-0">
+              <p class="font-headline text-title-sm font-semibold text-dark-on-surface truncate">Tokyo_Neon_Drive_1080p.mp4</p>
+              <p class="font-code text-[11px] text-success mt-0.5">Saved • 345 MB • Done</p>
+            </div>
+          </div>
+          <button type="button" aria-label="Open folder" class="w-6 h-6 rounded flex items-center justify-center text-dark-on-surface-variant hover:text-dark-on-surface hover:bg-border shrink-0">
+            <span class="material-symbols-outlined text-[14px]">folder_open</span>
+          </button>
+        </article>
+      </section>
+
+      <!-- Active Downloads Section / Queue -->
+      <section class="flex flex-col gap-2">
+        <div class="flex items-center justify-between px-0.5">
+          <div class="flex items-center gap-1.5">
+            <span class="text-[11px] font-code uppercase tracking-wider text-dark-on-surface-variant">Active Task</span>
+            <span class="w-1.5 h-1.5 rounded-full bg-accent animate-ping"></span>
+          </div>
+          <span class="text-[11px] font-code text-accent font-semibold">1 Download in progress</span>
+        </div>
+
+        <!-- Active Download Progress Item -->
+        <article data-component-id="card-interactive" data-component-type="card" data-component-variant="interactive" class="bg-dark-surface-variant border border-border rounded-lg p-2.5">
+          <div class="flex items-start justify-between gap-2 mb-2">
+            <div class="min-w-0 flex-1">
+              <div class="flex items-center gap-1.5">
+                <span class="material-symbols-outlined text-[14px] text-accent">downloading</span>
+                <h3 class="font-headline text-title-sm font-semibold text-dark-on-surface truncate">
+                  Cyberpunk_Rain_Tokyo_Ambient_4K.mp4
+                </h3>
+              </div>
+              <div class="flex items-center gap-2 mt-1 text-[11px] font-code text-dark-on-surface-variant">
+                <span class="text-accent font-bold">74%</span>
+                <span>•</span>
+                <span>1.05 GB / 1.42 GB</span>
+                <span>•</span>
+                <span class="text-dark-on-surface">18.4 MB/s</span>
+                <span>•</span>
+                <span>00:22 left</span>
+              </div>
+            </div>
+
+            <!-- Controls -->
+            <div class="flex items-center gap-1 shrink-0">
+              <button type="button" aria-label="Pause download" class="w-6 h-6 rounded flex items-center justify-center text-dark-on-surface-variant hover:text-dark-on-surface hover:bg-border transition-colors" title="Pause">
+                <span class="material-symbols-outlined text-[14px]">pause</span>
+              </button>
+              <button type="button" aria-label="Cancel download" class="w-6 h-6 rounded flex items-center justify-center text-dark-on-surface-variant hover:text-error hover:bg-border transition-colors" title="Cancel">
+                <span class="material-symbols-outlined text-[14px]">close</span>
+              </button>
+            </div>
+          </div>
+
+          <!-- Progress Bar -->
+          <div class="w-full h-1.5 bg-dark-surface rounded-full overflow-hidden border border-border-subtle">
+            <div class="h-full bg-accent rounded-full transition-all duration-300" style="width: 74%;"></div>
+          </div>
+        </article>
+      </section>
+
+      <!-- Advanced Options / Quick Utilities -->
+      <section class="grid grid-cols-2 gap-2">
+        <button type="button" data-component-id="button-with-icon" data-component-type="button" data-component-variant="with-icon" class="flex items-center justify-center gap-1.5 py-2 px-2 bg-dark-surface-variant hover:bg-border border border-border rounded text-[12px] font-headline text-dark-on-surface transition-colors">
+          <span class="material-symbols-outlined text-[15px] text-accent">music_note</span>
+          <span class="truncate">Extract Audio</span>
+        </button>
+
+        <button type="button" data-component-id="button-with-icon" data-component-type="button" data-component-variant="with-icon" class="flex items-center justify-center gap-1.5 py-2 px-2 bg-dark-surface-variant hover:bg-border border border-border rounded text-[12px] font-headline text-dark-on-surface transition-colors">
+          <span class="material-symbols-outlined text-[15px] text-warning">playlist_play</span>
+          <span class="truncate">Queue Playlist</span>
+        </button>
+      </section>
+
+    </main>
+
+    <!-- Footer Bar -->
+    <footer class="mt-auto px-page-margin py-2.5 bg-dark-surface border-t border-border flex items-center justify-between text-[11px] font-code text-dark-on-surface-variant">
+      <div class="flex items-center gap-2">
+        <span class="inline-block w-2 h-2 rounded-full bg-success"></span>
+        <span>Storage: 42.8 GB free</span>
+      </div>
+      <div class="flex items-center gap-3">
+        <button type="button" class="hover:text-dark-on-surface hover:underline flex items-center gap-1">
+          <span class="material-symbols-outlined text-[12px]">folder_open</span>
+          <span>Downloads</span>
+        </button>
+      </div>
+    </footer>
+
+  </div>
+
+  <script>
+    (function () {
+      const tabs = Array.from(document.querySelectorAll('[role="tab"]'));
+      const panels = Array.from(document.querySelectorAll('[role="tabpanel"]'));
+      const activeClasses = ['bg-dark-surface', 'text-dark-on-surface', 'shadow-sm', 'border', 'border-border/60'];
+      const inactiveClasses = ['text-dark-on-surface-variant', 'hover:text-dark-on-surface'];
+
+      function activateTab(targetTab) {
+        const targetPanelId = targetTab.getAttribute('aria-controls');
+        tabs.forEach((tab) => {
+          const isSelected = tab === targetTab;
+          tab.setAttribute('aria-selected', String(isSelected));
+          tab.setAttribute('tabindex', isSelected ? '0' : '-1');
+          activeClasses.forEach((cls) => tab.classList.toggle(cls, isSelected));
+          inactiveClasses.forEach((cls) => tab.classList.toggle(cls, !isSelected));
+        });
+        panels.forEach((panel) => {
+          const isMatch = panel.id === targetPanelId;
+          panel.classList.toggle('hidden', !isMatch);
+          panel.classList.toggle('flex', isMatch);
+        });
+      }
+
+      tabs.forEach((tab, index) => {
+        tab.addEventListener('click', () => activateTab(tab));
+        tab.addEventListener('keydown', (e) => {
+          if (e.key === 'ArrowRight' || e.key === 'ArrowLeft') {
+            e.preventDefault();
+            const dir = e.key === 'ArrowRight' ? 1 : -1;
+            const next = tabs[(index + dir + tabs.length) % tabs.length];
+            activateTab(next);
+            next.focus();
+          }
+        });
+      });
+
+      document.querySelectorAll('button').forEach((btn) => {
+        if (btn.textContent.includes('Extract Audio')) {
+          btn.addEventListener('click', () => activateTab(document.getElementById('tab-audio')));
+        } else if (btn.textContent.includes('Queue Playlist')) {
+          btn.addEventListener('click', () => activateTab(document.getElementById('tab-queue')));
+        }
+      });
+    })();
+  </script>
+
+
+
+</body></html>

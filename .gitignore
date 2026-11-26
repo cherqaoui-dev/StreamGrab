@@ -1,0 +1,10 @@
+node_modules/
+extension/node_modules/
+extension/.output/
+extension/.wxt/
+extension/dist/
+host/bin/
+dist/
+*.exe
+*.part
+.DS_Store

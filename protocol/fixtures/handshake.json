@@ -1,0 +1,14 @@
+{
+  "id": "1",
+  "type": "HANDSHAKE",
+  "ok": true,
+  "payload": {
+    "protocolVersion": 1,
+    "hostVersion": "0.1.0",
+    "ytDlpVersion": "2026.06.09",
+    "ffmpegVersion": "7.1",
+    "deno": true,
+    "denoVersion": "2.3.0",
+    "downloadDir": "C:/Users/me/Downloads/StreamGrab"
+  }
+}

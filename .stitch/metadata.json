@@ -1,0 +1,45 @@
+{
+  "projectId": "2139836994187367589",
+  "title": "YouTube Video Downloader Extension",
+  "deviceType": "",
+  "designTheme": {},
+  "syncedAt": "2026-11-25T21:22:33Z",
+  "screens": [
+    {
+      "id": "node_15402675971750487161",
+      "title": "StreamGrab \u2014 Extension Popup",
+      "width": 390,
+      "height": 884,
+      "html": ".stitch/designs/streamgrab-extension-popup.html",
+      "screenshot": "",
+      "deviceType": "MOBILE"
+    },
+    {
+      "id": "node_9701612484715251860",
+      "title": "StreamGrab \u2014 Audio Tab",
+      "width": 390,
+      "height": 884,
+      "html": ".stitch/designs/streamgrab-audio-tab.html",
+      "screenshot": "",
+      "deviceType": "MOBILE"
+    },
+    {
+      "id": "node_7264883692629257925",
+      "title": "StreamGrab \u2014 History Tab",
+      "width": 390,
+      "height": 884,
+      "html": ".stitch/designs/streamgrab-history-tab.html",
+      "screenshot": "",
+      "deviceType": "MOBILE"
+    },
+    {
+      "id": "node_15546354320576987461",
+      "title": "StreamGrab \u2014 Queue Tab",
+      "width": 390,
+      "height": 884,
+      "html": ".stitch/designs/streamgrab-queue-tab.html",
+      "screenshot": "",
+      "deviceType": "MOBILE"
+    }
+  ]
+}

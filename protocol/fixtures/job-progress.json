@@ -1,0 +1,14 @@
+{
+  "id": "evt-1",
+  "type": "JOB_PROGRESS",
+  "ok": true,
+  "payload": {
+    "jobId": "job-1",
+    "stage": "downloading_video",
+    "percent": 40,
+    "bytesDone": 400,
+    "bytesTotal": 1000,
+    "speedBps": 200000,
+    "etaSec": 12
+  }
+}

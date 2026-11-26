@@ -1,0 +1,15 @@
+{
+  "id": "2",
+  "type": "ENQUEUE",
+  "payload": {
+    "url": "https://www.youtube.com/watch?v=abcdefghijk",
+    "videoId": "abcdefghijk",
+    "title": "Example",
+    "thumbnail": "https://i.ytimg.com/vi/abcdefghijk/hqdefault.jpg",
+    "height": 1080,
+    "container": "mp4",
+    "videoFormatId": "137",
+    "audioFormatId": "140",
+    "estimatedBytes": 345000000
+  }
+}
