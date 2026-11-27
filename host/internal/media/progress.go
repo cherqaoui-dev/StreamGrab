@@ -1,6 +1,8 @@
 package media
 
 import (
+	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 )
@@ -12,25 +14,68 @@ type Progress struct {
 	BytesTotal int64
 	SpeedBps   float64
 	EtaSec     *float64
+	// File is the latest file the download reported writing to.
+	File string
+	// OutputPath is the finished file. Final is set once yt-dlp has confirmed it.
 	OutputPath string
+	Final      bool
 	SawMerger  bool
 }
+
+// FilePrefix marks the line on which yt-dlp prints the finished file's path.
+const FilePrefix = "streamgrab-file:"
 
 func ParseLine(line string, current Progress) Progress {
 	line = strings.TrimSpace(stripANSI(line))
 	switch {
+	case strings.HasPrefix(line, FilePrefix):
+		if path := strings.TrimPrefix(line, FilePrefix); path != "" {
+			current.OutputPath = path
+			current.Final = true
+		}
 	case strings.HasPrefix(line, "streamgrab:"):
 		return parseTemplate(line, current)
-	case strings.Contains(line, "[Merger]"), strings.Contains(line, "[ExtractAudio]"):
-		current.Stage = "muxing"
-		current.SawMerger = true
-		current.Percent = 100
-		if path := quotedPath(line); path != "" {
-			current.OutputPath = path
-		}
-	case strings.Contains(line, "[download] Destination:"):
+	case strings.HasPrefix(line, "[Merger]"):
+		current = postprocessing(current, quotedPath(line))
+	case strings.HasPrefix(line, "[ExtractAudio] Destination:"):
+		current = postprocessing(current, strings.TrimSpace(strings.TrimPrefix(line, "[ExtractAudio] Destination:")))
+	case strings.HasPrefix(line, "[ExtractAudio]"):
+		current = postprocessing(current, "")
+	case strings.HasPrefix(line, "[download] Destination:"):
 		current = advanceStage(current)
 		if path := strings.TrimSpace(strings.TrimPrefix(line, "[download] Destination:")); path != "" {
+			current.File = path
+		}
+	case strings.HasPrefix(line, "[ThumbnailsConvertor] Converting thumbnail"):
+		// Thumbnails are recorded so that cancelling a job removes them.
+		if path := quotedPath(line); path != "" {
+			current.File = strings.TrimSuffix(path, filepath.Ext(path)) + ".jpg"
+		}
+	default:
+		if path := thumbnailPath(line); path != "" {
+			current.File = path
+		}
+	}
+	return current
+}
+
+// thumbnailWritten matches yt-dlp's notice that it saved a thumbnail.
+var thumbnailWritten = regexp.MustCompile(`^\[[^\]]+\] (?:[^:]+: )?Writing (?:[^:]* )?thumbnail(?: [^:]*)? to: (.+\.(?:jpg|jpeg|png|webp))$`)
+
+func thumbnailPath(line string) string {
+	if match := thumbnailWritten.FindStringSubmatch(line); match != nil {
+		return match[1]
+	}
+	return ""
+}
+
+func postprocessing(current Progress, path string) Progress {
+	current.Stage = "muxing"
+	current.SawMerger = true
+	current.Percent = 100
+	if path != "" {
+		current.File = path
+		if !current.Final {
 			current.OutputPath = path
 		}
 	}

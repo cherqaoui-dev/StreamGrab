@@ -73,10 +73,10 @@ func TestNextSuffixSkipsFragments(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if n := nextSuffix(dir, "abcdefghijk", "mp4"); n != 2 {
+	if n := nextSuffix(dir, "abcdefghijk", "mp4", nil); n != 2 {
 		t.Fatalf("suffix = %d", n)
 	}
-	video, audio := findStreams(dir, "abcdefghijk")
+	video, audio := findStreams(dir, jobs.Job{VideoID: "abcdefghijk", VideoFormatID: "137", AudioFormatID: "140"})
 	if video == "" || audio != "" {
 		t.Fatalf("streams video=%s audio=%s", video, audio)
 	}
@@ -119,5 +119,18 @@ func TestPrependPath(t *testing.T) {
 	want := "Path=" + `C:\deno` + string(os.PathListSeparator) + `C:\Windows`
 	if len(got) != 2 || got[0] != want || got[1] != "FOO=1" {
 		t.Fatalf("%q", got)
+	}
+}
+
+func TestVideoThumbnailArguments(t *testing.T) {
+	runner := &Runner{DownloadDir: t.TempDir()}
+	for container, want := range map[string]bool{"": true, "mp4": true, "mkv": true, "webm": false} {
+		args, err := runner.arguments(jobs.Job{Kind: "video", VideoID: "abc", VideoFormatID: "137", AudioFormatID: "140", Container: container})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := strings.Contains(strings.Join(args, "\n"), "--embed-thumbnail"); got != want {
+			t.Errorf("container %q: embed thumbnail = %v, want %v", container, got, want)
+		}
 	}
 }

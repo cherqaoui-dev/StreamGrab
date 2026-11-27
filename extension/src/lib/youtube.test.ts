@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { isFresh, jobKey, parseYouTubeUrl } from "./youtube";
+import { isFresh, parseYouTubeUrl } from "./youtube";
 
 describe("parseYouTubeUrl", () => {
   it("accepts watch, shorts, live, and youtu.be links", () => {
@@ -18,14 +18,10 @@ describe("parseYouTubeUrl", () => {
   });
 });
 
-describe("cache and keys", () => {
+describe("cache", () => {
   it("expires metadata after 10 minutes", () => {
     const now = 1_000_000;
     expect(isFresh(now - 9 * 60 * 1000, now)).toBe(true);
     expect(isFresh(now - 11 * 60 * 1000, now)).toBe(false);
-  });
-
-  it("builds a stable queue key", () => {
-    expect(jobKey("abcdefghijk", 1080)).toBe("abcdefghijk:1080:mp4");
   });
 });

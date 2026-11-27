@@ -4,16 +4,16 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
-	"encoding/json"
+	"log"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
 
 	"streamgrab/host/internal/media"
 	"streamgrab/host/internal/protocol"
-	"streamgrab/host/internal/settings"
 )
 
 const (
@@ -55,18 +55,24 @@ type Job struct {
 	SampleRate     int             `json:"sampleRate,omitempty"`
 	Attempts       int             `json:"attempts,omitempty"`
 	RetryMux       bool            `json:"retryMux,omitempty"`
+	// Dir is the folder the job downloads into. It is fixed when the job first
+	// starts, so changing the setting doesn't strand its partial files.
+	Dir string `json:"dir,omitempty"`
+	// Files lists what the job has written to, so that only those are removed
+	// when it is cancelled. It is saved with the queue and not sent to the browser.
+	Files []string `json:"files,omitempty"`
 }
 
 type Request struct {
-	URL            string
-	VideoID        string
-	Title          string
-	Thumbnail      string
-	Height         int
-	Container      string
-	VideoFormatID  string
-	AudioFormatID  string
-	EstimatedBytes int64
+	URL            string `json:"url"`
+	VideoID        string `json:"videoId"`
+	Title          string `json:"title"`
+	Thumbnail      string `json:"thumbnail"`
+	Height         int    `json:"height"`
+	Container      string `json:"container"`
+	VideoFormatID  string `json:"videoFormatId"`
+	AudioFormatID  string `json:"audioFormatId"`
+	EstimatedBytes int64  `json:"estimatedBytes"`
 	Kind           string `json:"kind"`
 	RecodeAudio    bool   `json:"recodeAudio"`
 	SampleRate     int    `json:"sampleRate"`
@@ -102,6 +108,9 @@ type Event struct {
 	Job  Job
 }
 
+// Manager owns the queue. At most one job runs at a time: slot names the job
+// that holds the queue because it is running, paused mid-download, or waiting to
+// retry. A job with an entry in active has a process that hasn't exited yet.
 type Manager struct {
 	mu          sync.Mutex
 	jobs        []*Job
@@ -110,21 +119,17 @@ type Manager struct {
 	disk        Disk
 	downloadDir string
 	storePath   string
-	slot        string
-	active      map[string]activeRun
-	onEvent     func(Event)
-	onDir       func(string)
-	now         func() time.Time
-	backoff     func(int) time.Duration
-	root        context.Context
-}
-
-type activeRun struct {
-	cancel    context.CancelFunc
-	handle    Handle
-	suspended bool
-	lastEmit  time.Time
-	smoothed  *float64
+	// keepStore stops writes when the saved queue exists but couldn't be
+	// read or set aside, so it is never replaced with an empty one.
+	keepStore bool
+	slot      string
+	active    map[string]*activeRun
+	running   sync.WaitGroup
+	closing   bool
+	onEvent   func(Event)
+	now       func() time.Time
+	backoff   func(int) time.Duration
+	root      context.Context
 }
 
 func New(root context.Context, runner Runner, suspend Suspender, disk Disk, downloadDir, storePath string) *Manager {
@@ -134,13 +139,17 @@ func New(root context.Context, runner Runner, suspend Suspender, disk Disk, down
 		disk:        disk,
 		downloadDir: downloadDir,
 		storePath:   storePath,
-		active:      map[string]activeRun{},
+		active:      map[string]*activeRun{},
 		now:         time.Now,
 		root:        root,
 	}
-	_ = m.load()
+	if err := m.load(); err != nil {
+		log.Printf("load queue: %v", err)
+	}
 	m.recover()
-	sweepFragments(downloadDir, 24*time.Hour, time.Now())
+	m.sweep()
+	m.prune()
+	m.persist()
 	return m
 }
 
@@ -150,10 +159,15 @@ func (m *Manager) OnEvent(fn func(Event)) {
 	m.onEvent = fn
 }
 
+// List returns the queue as it is shown to the browser.
 func (m *Manager) List() []Job {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	return m.snapshot()
+	out := make([]Job, len(m.jobs))
+	for i, job := range m.jobs {
+		out[i] = public(job)
+	}
+	return out
 }
 
 func (m *Manager) DownloadDir() string {
@@ -162,10 +176,16 @@ func (m *Manager) DownloadDir() string {
 	return m.downloadDir
 }
 
-func (m *Manager) OnDownloadDir(fn func(string)) {
+// HasOutput reports whether path is the saved file of a job in the list.
+func (m *Manager) HasOutput(path string) bool {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.onDir = fn
+	for _, job := range m.jobs {
+		if job.State == StateDone && job.OutputPath != "" && strings.EqualFold(filepath.Clean(job.OutputPath), filepath.Clean(path)) {
+			return true
+		}
+	}
+	return false
 }
 
 func (m *Manager) SetDownloadDir(path string) error {
@@ -184,13 +204,9 @@ func (m *Manager) SetDownloadDir(path string) error {
 	_ = probe.Close()
 	_ = os.Remove(name)
 	m.mu.Lock()
+	defer m.mu.Unlock()
 	m.downloadDir = clean
 	m.persistDir()
-	hook := m.onDir
-	m.mu.Unlock()
-	if hook != nil {
-		hook(clean)
-	}
 	return nil
 }
 
@@ -205,13 +221,13 @@ func (m *Manager) Enqueue(req Request) (Result, error) {
 	if container == "" {
 		container = "mp4"
 	}
-	key := req.VideoID + ":" + itoa(req.Height) + ":" + container
+	key := req.VideoID + ":" + strconv.Itoa(req.Height) + ":" + container
 	if kind == "audio" {
 		key = req.VideoID + ":audio:" + container
 	}
 	for _, job := range m.jobs {
 		if job.Key == key && !terminal(job.State) {
-			return Result{Job: *job, Already: true}, nil
+			return Result{Job: public(job), Already: true}, nil
 		}
 	}
 	if req.EstimatedBytes > 0 && m.disk != nil {
@@ -243,52 +259,34 @@ func (m *Manager) Enqueue(req Request) (Result, error) {
 		CreatedAt:      m.now().UTC().Format(time.RFC3339),
 	}
 	m.jobs = append(m.jobs, job)
-	m.persist()
-	m.emit(Event{Type: "JOB_STATE", Job: *job})
+	m.changed(job)
 	m.kick()
-	return Result{Job: *job}, nil
+	return Result{Job: public(job)}, nil
 }
 
+// Pause suspends a running job, or stops it if it can't be suspended. A job
+// that is still waiting its turn is set aside without holding up the queue.
 func (m *Manager) Pause(id string) error {
 	m.mu.Lock()
+	defer m.mu.Unlock()
 	job := m.find(id)
 	if job == nil || terminal(job.State) {
-		m.mu.Unlock()
 		return &protocol.Error{Code: "UNKNOWN", Message: "That download is not active."}
 	}
-	run := m.active[id]
+	if job.State == StatePaused {
+		return nil
+	}
+	if run := m.active[id]; run != nil {
+		suspendable := run.handle != nil && run.handle.PID() != 0
+		if suspendable && m.suspend.Suspend(run.handle.PID()) == nil {
+			run.suspended = true
+		} else {
+			run.stop()
+			job.ResumeDownload = true
+		}
+	}
 	job.State = StatePaused
-	m.slot = id
-	m.persist()
-	m.emit(Event{Type: "JOB_STATE", Job: *job})
-	m.mu.Unlock()
-
-	if run.handle == nil {
-		m.mu.Lock()
-		if current := m.find(id); current != nil {
-			current.ResumeDownload = true
-			m.persist()
-		}
-		m.mu.Unlock()
-		return nil
-	}
-	if err := m.suspend.Suspend(run.handle.PID()); err != nil {
-		m.mu.Lock()
-		if current := m.find(id); current != nil {
-			current.ResumeDownload = true
-		}
-		delete(m.active, id)
-		m.persist()
-		m.mu.Unlock()
-		_ = run.handle.Kill()
-		return nil
-	}
-	m.mu.Lock()
-	if current, ok := m.active[id]; ok {
-		current.suspended = true
-		m.active[id] = current
-	}
-	m.mu.Unlock()
+	m.changed(job)
 	return nil
 }
 
@@ -299,27 +297,29 @@ func (m *Manager) Resume(id string) error {
 	if job == nil || job.State != StatePaused {
 		return &protocol.Error{Code: "UNKNOWN", Message: "That download is not paused."}
 	}
-	if run, ok := m.active[id]; ok && run.suspended && run.handle != nil {
+	run := m.active[id]
+	if run != nil && run.suspended && !run.stopped {
 		if err := m.suspend.Resume(run.handle.PID()); err != nil {
 			return &protocol.Error{Code: "UNKNOWN", Message: "StreamGrab couldn't resume the download."}
 		}
 		run.suspended = false
-		m.active[id] = run
 		job.State = job.Stage
 		if job.State == "" || job.State == StatePaused || job.State == StateQueued {
 			job.State = StateDownloadingVideo
 		}
-		m.persist()
-		m.emit(Event{Type: "JOB_STATE", Job: *job})
+		m.changed(job)
 		return nil
 	}
 	job.ResumeDownload = true
 	job.Attempts = 0
 	job.State = StateQueued
-	if m.slot == id {
-		m.slot = ""
+	job.Stage = StateQueued
+	job.Error = nil
+	// A process that is still exiting releases the queue itself.
+	if run == nil {
+		m.release(id)
 	}
-	m.persist()
+	m.changed(job)
 	m.kick()
 	return nil
 }
@@ -330,206 +330,37 @@ func (m *Manager) ResumeQueue() {
 	m.kick()
 }
 
+// Cancel stops a job and discards its partial files. Cancelling a job that has
+// already failed or been cancelled removes it from the list.
 func (m *Manager) Cancel(id string) error {
 	m.mu.Lock()
+	defer m.mu.Unlock()
 	job := m.find(id)
 	if job == nil {
-		m.mu.Unlock()
 		return &protocol.Error{Code: "UNKNOWN", Message: "That download is not in the queue."}
 	}
-	if job.State == StateDone {
-		m.mu.Unlock()
+	switch job.State {
+	case StateDone:
 		return &protocol.Error{Code: "UNKNOWN", Message: "That download already finished."}
-	}
-	run := m.active[id]
-	delete(m.active, id)
-	if m.slot == id {
-		m.slot = ""
+	case StateFailed, StateCancelled:
+		m.remove(job)
+		m.persist()
+		return nil
 	}
 	job.State = StateCancelled
 	job.Error = &protocol.Error{Code: "CANCELLED", Message: "Download cancelled."}
-	m.persist()
-	copied := *job
-	m.emit(Event{Type: "JOB_STATE", Job: copied})
+	if run := m.active[id]; run != nil {
+		// The files are removed once the process has let go of them.
+		run.discard = true
+		run.stop()
+		m.changed(job)
+		return nil
+	}
+	m.discard(job)
+	m.release(id)
+	m.changed(job)
 	m.kick()
-	m.mu.Unlock()
-	if run.cancel != nil {
-		run.cancel()
-	}
-	if run.handle != nil {
-		_ = run.handle.Kill()
-	}
-	cleanParts(m.downloadDir, copied.VideoID)
 	return nil
-}
-
-func (m *Manager) kick() {
-	if m.slot != "" {
-		return
-	}
-	for _, job := range m.jobs {
-		if job.State == StateQueued {
-			m.start(job)
-			return
-		}
-	}
-}
-
-func (m *Manager) start(job *Job) {
-	ctx, cancel := context.WithCancel(m.root)
-	if job.Kind == "audio" {
-		job.State = StateDownloadingAudio
-		job.Stage = StateDownloadingAudio
-	} else {
-		job.State = StateDownloadingVideo
-		job.Stage = StateDownloadingVideo
-	}
-	m.slot = job.ID
-	m.active[job.ID] = activeRun{cancel: cancel}
-	m.persist()
-	m.emit(Event{Type: "JOB_STATE", Job: *job})
-	go m.run(job.ID, ctx, cancel)
-}
-
-func (m *Manager) run(id string, ctx context.Context, cancel context.CancelFunc) {
-	m.mu.Lock()
-	job := m.find(id)
-	if job == nil {
-		m.mu.Unlock()
-		cancel()
-		return
-	}
-	snapshot := *job
-	m.mu.Unlock()
-
-	handle, err := m.runner.Start(ctx, snapshot, func(progress media.Progress) {
-		m.onProgress(id, progress)
-	})
-	if err != nil {
-		m.finish(id, err, "")
-		return
-	}
-	m.mu.Lock()
-	if run, ok := m.active[id]; ok {
-		run.handle = handle
-		m.active[id] = run
-	}
-	m.mu.Unlock()
-	err = handle.Wait()
-	path := handle.OutputPath()
-	m.finish(id, err, path)
-}
-
-func (m *Manager) onProgress(id string, progress media.Progress) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	job := m.find(id)
-	run, ok := m.active[id]
-	if job == nil || !ok || job.State == StatePaused || job.State == StateCancelled {
-		return
-	}
-	stage := progress.Stage
-	if stage == "" {
-		stage = job.Stage
-	}
-	previous := job.Stage
-	job.Stage = stage
-	if stage == StateMuxing {
-		job.State = StateMuxing
-	} else if stage == StateDownloadingAudio || job.Kind == "audio" {
-		job.State = StateDownloadingAudio
-	} else if job.State != StatePaused {
-		job.State = StateDownloadingVideo
-	}
-	job.Percent = progress.Percent
-	job.BytesDone = progress.BytesDone
-	job.BytesTotal = progress.BytesTotal
-	job.SpeedBps = progress.SpeedBps
-	job.EtaSec = smooth(&run, progress.EtaSec)
-	if progress.OutputPath != "" {
-		job.OutputPath = progress.OutputPath
-	}
-	m.active[id] = run
-	now := m.now()
-	if !run.lastEmit.IsZero() && now.Sub(run.lastEmit) < 250*time.Millisecond && stage == previous {
-		return
-	}
-	run.lastEmit = now
-	m.active[id] = run
-	m.emit(Event{Type: "JOB_PROGRESS", Job: *job})
-}
-
-func (m *Manager) finish(id string, err error, path string) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	job := m.find(id)
-	delete(m.active, id)
-	if job == nil || job.State == StateCancelled || job.State == StatePaused {
-		if m.slot == id && (job == nil || job.State != StatePaused) {
-			m.slot = ""
-		}
-		m.persist()
-		m.kick()
-		return
-	}
-	if err == nil && path != "" {
-		if info, statErr := os.Stat(path); statErr == nil && info.Size() == 0 {
-			_ = os.Remove(path)
-			err = &protocol.Error{Code: "MUX_FAILED", Message: "Muxing failed. The partial streams were kept."}
-			path = ""
-		}
-	}
-	if path != "" {
-		job.OutputPath = path
-	}
-	if m.slot == id {
-		m.slot = ""
-	}
-	if err != nil {
-		code, message := classify(err)
-		if code == "NETWORK_ERROR" && job.Attempts < 3 {
-			job.Attempts++
-			attempt := job.Attempts
-			job.State = StateQueued
-			job.Stage = StateQueued
-			job.ResumeDownload = true
-			job.Error = nil
-			m.persist()
-			m.emit(Event{Type: "JOB_STATE", Job: *job})
-			delay := m.retryAfter(attempt)
-			go func() {
-				time.Sleep(delay)
-				m.mu.Lock()
-				defer m.mu.Unlock()
-				if current := m.find(id); current != nil && current.State == StateQueued {
-					m.kick()
-				}
-			}()
-			return
-		}
-		if code == "NETWORK_ERROR" {
-			job.State = StatePaused
-			job.Stage = StatePaused
-			job.ResumeDownload = true
-			job.Error = &protocol.Error{Code: "NETWORK_ERROR", Message: "The download paused because the network failed."}
-			m.slot = id
-			m.persist()
-			m.emit(Event{Type: "JOB_STATE", Job: *job})
-			return
-		}
-		job.State = StateFailed
-		job.Error = &protocol.Error{Code: code, Message: message}
-	} else {
-		job.State = StateDone
-		job.Stage = StateDone
-		job.Percent = 100
-		job.Error = nil
-		job.RetryMux = false
-		job.Attempts = 0
-	}
-	m.persist()
-	m.emit(Event{Type: "JOB_STATE", Job: *job})
-	m.kick()
 }
 
 func (m *Manager) RetryMux(id, container string) error {
@@ -539,61 +370,51 @@ func (m *Manager) RetryMux(id, container string) error {
 	if job == nil || job.State != StateFailed || job.Error == nil || job.Error.Code != "MUX_FAILED" {
 		return &protocol.Error{Code: "MUX_FAILED", Message: "That download cannot be muxed again."}
 	}
-	if container == "" {
-		container = job.Container
+	if job.Kind == "audio" {
+		// Audio has no streams to merge. yt-dlp repeats the conversion.
+		job.RetryMux = false
+		job.ResumeDownload = true
+	} else {
+		if container == "" {
+			container = job.Container
+		}
+		switch container {
+		case "mp4", "webm", "mkv":
+		default:
+			return &protocol.Error{Code: "UNKNOWN", Message: "Choose MP4, WebM, or MKV."}
+		}
+		job.Container = container
+		job.RetryMux = true
 	}
-	switch container {
-	case "mp4", "webm", "mkv":
-	default:
-		return &protocol.Error{Code: "UNKNOWN", Message: "Choose MP4, WebM, or MKV."}
-	}
-	job.Container = container
-	job.RetryMux = true
 	job.State = StateQueued
 	job.Stage = StateQueued
 	job.Error = nil
 	job.Percent = 0
-	if m.slot == id {
-		m.slot = ""
-	}
-	m.persist()
-	m.emit(Event{Type: "JOB_STATE", Job: *job})
+	job.Attempts = 0
+	m.release(id)
+	m.changed(job)
 	m.kick()
 	return nil
 }
 
-func (m *Manager) retryAfter(attempt int) time.Duration {
-	if m.backoff != nil {
-		return m.backoff(attempt)
-	}
-	if attempt < 1 {
-		attempt = 1
-	}
-	if attempt > 3 {
-		attempt = 3
-	}
-	return time.Duration(1<<(attempt-1)) * time.Second
-}
-
+// recover pauses jobs that were running when the host last stopped.
 func (m *Manager) recover() {
 	for _, job := range m.jobs {
 		switch job.State {
-		case StateDownloadingVideo, StateDownloadingAudio, StateMuxing, StateQueued:
-			if job.State != StateQueued {
-				job.State = StatePaused
-				job.ResumeDownload = true
-				job.Stage = StatePaused
-			}
+		case StateDownloadingVideo, StateDownloadingAudio, StateMuxing:
+			job.State = StatePaused
+			job.ResumeDownload = true
+			job.Stage = StatePaused
 		}
 	}
 	m.slot = ""
 	for _, job := range m.jobs {
-		if job.State == StatePaused {
+		// A job that was set aside before it started doesn't hold the queue.
+		if job.State == StatePaused && job.ResumeDownload {
 			m.slot = job.ID
 			break
 		}
 	}
-	m.persist()
 }
 
 func (m *Manager) find(id string) *Job {
@@ -605,12 +426,16 @@ func (m *Manager) find(id string) *Job {
 	return nil
 }
 
-func (m *Manager) snapshot() []Job {
-	out := make([]Job, len(m.jobs))
-	for i, job := range m.jobs {
-		out[i] = *job
+func (m *Manager) release(id string) {
+	if m.slot == id {
+		m.slot = ""
 	}
-	return out
+}
+
+// changed saves the queue and tells the browser about one job.
+func (m *Manager) changed(job *Job) {
+	m.persist()
+	m.emit(Event{Type: "JOB_STATE", Job: public(job)})
 }
 
 func (m *Manager) emit(event Event) {
@@ -619,150 +444,18 @@ func (m *Manager) emit(event Event) {
 	}
 }
 
-func (m *Manager) persistDir() {
-	if m.storePath == "" {
-		return
-	}
-	dir := m.downloadDir
-	_ = settings.Update(settings.PathBeside(m.storePath), func(file *settings.File) {
-		file.DownloadDir = dir
-	})
-}
-
-func (m *Manager) persist() {
-	if m.storePath == "" {
-		return
-	}
-	_ = os.MkdirAll(filepath.Dir(m.storePath), 0o755)
-	raw, err := json.MarshalIndent(m.snapshot(), "", "  ")
-	if err != nil {
-		return
-	}
-	_ = os.WriteFile(m.storePath, raw, 0o644)
-}
-
-func (m *Manager) load() error {
-	if m.storePath == "" {
-		return nil
-	}
-	raw, err := os.ReadFile(m.storePath)
-	if err != nil {
-		return err
-	}
-	var jobs []Job
-	if err := json.Unmarshal(raw, &jobs); err != nil {
-		return err
-	}
-	m.jobs = make([]*Job, len(jobs))
-	for i := range jobs {
-		job := jobs[i]
-		m.jobs[i] = &job
-	}
-	return nil
+func public(job *Job) Job {
+	out := *job
+	out.Files = nil
+	return out
 }
 
 func terminal(state string) bool {
 	return state == StateDone || state == StateFailed || state == StateCancelled
 }
 
-func smooth(run *activeRun, next *float64) *float64 {
-	if next == nil || *next <= 0 {
-		return nil
-	}
-	value := *next
-	if run.smoothed != nil {
-		value = *run.smoothed*0.7 + value*0.3
-	}
-	run.smoothed = &value
-	return &value
-}
-
-func classify(err error) (string, string) {
-	if api, ok := err.(*protocol.Error); ok {
-		return api.Code, api.Message
-	}
-	text := err.Error()
-	switch {
-	case contains(text, "mux"):
-		return "MUX_FAILED", "Muxing failed. The partial streams were kept."
-	case contains(text, "disk"), contains(text, "space"):
-		return "DISK_FULL", "The download disk is full."
-	case contains(text, "network"), contains(text, "timed out"):
-		return "NETWORK_ERROR", "The download stopped because the network failed."
-	default:
-		return "EXTRACTION_FAILED", "The download failed. Update yt-dlp and try again."
-	}
-}
-
-func contains(s, part string) bool {
-	return len(s) >= len(part) && (s == part || indexFold(s, part))
-}
-
-func indexFold(s, part string) bool {
-	return len(part) > 0 && len(s) >= len(part) && (stringContainsFold(s, part))
-}
-
-func stringContainsFold(s, part string) bool {
-	ls := toLower(s)
-	return len(ls) >= len(part) && containsLower(ls, toLower(part))
-}
-
-func containsLower(s, part string) bool {
-	for i := 0; i+len(part) <= len(s); i++ {
-		if s[i:i+len(part)] == part {
-			return true
-		}
-	}
-	return false
-}
-
-func toLower(s string) string {
-	b := []byte(s)
-	for i, c := range b {
-		if c >= 'A' && c <= 'Z' {
-			b[i] = c + 32
-		}
-	}
-	return string(b)
-}
-
-func cleanParts(dir, videoID string) {
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		return
-	}
-	for _, entry := range entries {
-		name := entry.Name()
-		if len(videoID) > 0 && containsLower(toLower(name), toLower(videoID)) && containsLower(toLower(name), ".part") {
-			_ = os.Remove(filepath.Join(dir, name))
-		}
-	}
-}
-
 func newID() string {
 	var buf [8]byte
 	_, _ = rand.Read(buf[:])
 	return hex.EncodeToString(buf[:])
-}
-
-func itoa(n int) string {
-	if n == 0 {
-		return "0"
-	}
-	var digits [16]byte
-	i := len(digits)
-	neg := n < 0
-	if neg {
-		n = -n
-	}
-	for n > 0 {
-		i--
-		digits[i] = byte('0' + n%10)
-		n /= 10
-	}
-	if neg {
-		i--
-		digits[i] = '-'
-	}
-	return string(digits[i:])
 }

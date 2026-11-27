@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"io"
 	"log"
 	"os"
@@ -25,16 +24,14 @@ func main() {
 	}
 	store := jobsPath()
 	downloadDir := loadDownloadDir(store, fallback)
-	if err := ytdlp.MustDir(downloadDir); err != nil {
-		log.Fatal(err)
+	if err := os.MkdirAll(downloadDir, 0o755); err != nil {
+		log.Fatalf("create download directory: %v", err)
 	}
-	shared := downloadDir
 	config := settings.Load(settings.PathBeside(store))
 	core := coreDir()
 	runner := &ytdlp.Runner{
 		YtDlpPath:   ytdlp.PreferredBinary(core),
 		FFmpegPath:  ytdlp.ResolveTool("ffmpeg"),
-		Dir:         &shared,
 		DownloadDir: downloadDir,
 	}
 	if runner.YtDlpPath == "" {
@@ -43,7 +40,6 @@ func main() {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	manager := jobs.New(ctx, runner, platform.NewSuspender(), platform.Disk{}, downloadDir, store)
-	manager.OnDownloadDir(func(path string) { shared = path })
 	versions := app.NewVersions(downloadDir, runner.Probe(ctx))
 	versions.AutoUpdate = settings.Enabled(config)
 	versions.UpdateWarning = config.CoreWarning
@@ -61,7 +57,10 @@ func main() {
 			return ytdlp.CommandVersion(ctx, path)
 		}},
 	}
-	if err := server.Serve(ctx); err != nil && err != io.EOF {
+	err = server.Serve(ctx)
+	// The browser has gone, so downloads stop here and resume next time.
+	manager.Shutdown()
+	if err != nil && err != io.EOF {
 		log.Fatal(err)
 	}
 }
@@ -78,17 +77,10 @@ func loadDownloadDir(store, fallback string) string {
 	if store == "" {
 		return fallback
 	}
-	raw, err := os.ReadFile(filepath.Join(filepath.Dir(store), "settings.json"))
-	if err != nil {
-		return fallback
+	if dir := settings.Load(settings.PathBeside(store)).DownloadDir; strings.TrimSpace(dir) != "" {
+		return dir
 	}
-	var body struct {
-		DownloadDir string `json:"downloadDir"`
-	}
-	if json.Unmarshal(raw, &body) != nil || strings.TrimSpace(body.DownloadDir) == "" {
-		return fallback
-	}
-	return body.DownloadDir
+	return fallback
 }
 
 func coreDir() string {

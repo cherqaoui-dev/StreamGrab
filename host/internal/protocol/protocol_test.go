@@ -25,7 +25,7 @@ func TestFrameRoundTrip(t *testing.T) {
 
 func TestRejectsOversizedFrame(t *testing.T) {
 	var buf bytes.Buffer
-	if err := Write(&buf, bytes.Repeat([]byte("a"), maxMessage+1)); err != ErrTooLarge {
+	if err := Write(&buf, bytes.Repeat([]byte("a"), MaxOutgoing+1)); err != ErrTooLarge {
 		t.Fatalf("write error = %v", err)
 	}
 }

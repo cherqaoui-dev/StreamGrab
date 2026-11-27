@@ -11,10 +11,13 @@ import (
 const (
 	ProtocolVersion = 1
 	HostVersion     = "0.3.0"
-	maxMessage      = 4 << 20
+	// maxMessage limits what the host reads from the browser.
+	maxMessage = 4 << 20
+	// MaxOutgoing is Chrome's limit for one message from a native host.
+	MaxOutgoing = 1 << 20
 )
 
-var ErrTooLarge = errors.New("native message exceeds 4 MiB")
+var ErrTooLarge = errors.New("native message is too large")
 
 type Incoming struct {
 	ID      string          `json:"id"`
@@ -83,7 +86,7 @@ func Read(r io.Reader) ([]byte, error) {
 }
 
 func Write(w io.Writer, payload []byte) error {
-	if len(payload) > maxMessage {
+	if len(payload) > MaxOutgoing {
 		return ErrTooLarge
 	}
 	if err := binary.Write(w, binary.LittleEndian, uint32(len(payload))); err != nil {
