@@ -42,7 +42,3 @@ function canonical(videoId: string, kind: YouTubeKind): ParsedYouTube {
 export function isFresh(fetchedAt: number, now = Date.now()): boolean {
   return now - fetchedAt < 10 * 60 * 1000;
 }
-
-export function jobKey(videoId: string, height: number): string {
-  return `${videoId}:${height}:mp4`;
-}

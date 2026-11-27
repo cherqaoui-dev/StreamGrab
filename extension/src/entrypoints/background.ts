@@ -1,3 +1,6 @@
+import { isFinished, isLive, replaceJob, withProgress, type Progress } from "../lib/jobs";
+import { KEYS, LEGACY_KEY, readStored, toStored, type Part } from "../lib/storage";
+import { isFromWatchedTab } from "../lib/tabs";
 import { isFresh, parseYouTubeUrl } from "../lib/youtube";
 import {
   CACHE_MS,
@@ -16,38 +19,44 @@ import {
   type VideoInfo,
 } from "../protocol/types";
 
-type CacheEntry = VideoInfo;
-
 const state: Snapshot = emptySnapshot();
-const cache = new Map<string, CacheEntry>();
+const cache = new Map<string, VideoInfo>();
 const pending = new Map<
   string,
   {
     resolve: (message: Envelope) => void;
     reject: (error: Error) => void;
     timer: ReturnType<typeof setTimeout>;
-    generation: number;
   }
 >();
 const popups = new Set<Browser.runtime.Port>();
 let native: Browser.runtime.Port | null = null;
-let generation = 0;
+// The tab the popup was last opened on. Page messages from other tabs are ignored.
+let watchedTabId: number | null = null;
+// lookup numbers the latest video lookup; replies to older ones are dropped.
+let lookup = 0;
+let loadingId: string | null = null;
 let retryMs = 1000;
 let retryTimer: ReturnType<typeof setTimeout> | undefined;
 let diskTimer: ReturnType<typeof setInterval> | undefined;
 
 export default defineBackground(() => {
-  void restore().then(() => connect());
+  // Messages wait for the saved state, so they can't overwrite it.
+  const ready = restore();
+  void ready.then(() => connect());
   browser.runtime.onConnect.addListener((port) => {
     if (port.name !== "popup") return;
     popups.add(port);
-    port.postMessage({ type: "SNAPSHOT", snapshot: state });
     port.onMessage.addListener((message) => {
-      void onPopup(message as PopupMessage);
+      void ready.then(() => onPopup(message as PopupMessage));
     });
     port.onDisconnect.addListener(() => popups.delete(port));
+    void ready.then(() => {
+      if (popups.has(port)) port.postMessage({ type: "SNAPSHOT", snapshot: state });
+    });
   });
-  browser.runtime.onMessage.addListener((message) => {
+  browser.runtime.onMessage.addListener((message, sender) => {
+    if (!isFromWatchedTab(sender.tab?.id, watchedTabId)) return;
     if (message?.type === "PAGE_VIDEO") applyPage(message.payload as PageVideo);
     if (message?.type === "PAGE_CLEAR") clearPage();
   });
@@ -55,7 +64,7 @@ export default defineBackground(() => {
 
 type PopupMessage =
   | { type: "GET_STATE" }
-  | { type: "ACTIVE_TAB"; url?: string; title?: string }
+  | { type: "ACTIVE_TAB"; tabId?: number; url?: string; title?: string }
   | { type: "ENQUEUE"; kind: "video" | "audio"; row?: FormatRow; audio?: AudioRow }
   | { type: "PAUSE"; jobId: string }
   | { type: "RESUME"; jobId: string }
@@ -73,37 +82,43 @@ type PopupMessage =
   | { type: "RETRY_MUX"; jobId: string; container?: string };
 
 async function restore(): Promise<void> {
-  const stored = await browser.storage.local.get("streamgrab");
-  const data = stored.streamgrab as
-    | { cache?: CacheEntry[]; jobs?: Job[]; hiddenJobIds?: string[]; settings?: Settings }
-    | undefined;
-  for (const entry of data?.cache ?? []) {
+  const raw = await browser.storage.local.get([...Object.values(KEYS), LEGACY_KEY]);
+  const data = readStored(raw);
+  for (const entry of data.cache ?? []) {
     if (isFresh(entry.fetchedAt) && entry.presets) cache.set(entry.id, entry);
   }
-  state.jobs = data?.jobs ?? [];
-  state.hiddenJobIds = data?.hiddenJobIds ?? [];
-  state.settings = { ...defaultSettings(), ...data?.settings };
+  state.jobs = data.jobs ?? [];
+  state.hiddenJobIds = data.hiddenJobIds ?? [];
+  state.settings = { ...defaultSettings(), ...data.settings };
+  if (raw[LEGACY_KEY]) {
+    await persist("cache", "jobs", "hiddenJobIds", "settings");
+    await browser.storage.local.remove(LEGACY_KEY);
+  }
 }
 
 function connect(): void {
   if (retryTimer) clearTimeout(retryTimer);
+  dropHost();
   state.host = "connecting";
   broadcast();
+  let port: Browser.runtime.Port;
   try {
-    native = browser.runtime.connectNative(HOST_NAME);
+    port = browser.runtime.connectNative(HOST_NAME);
   } catch {
     failHost();
     return;
   }
-  native.onMessage.addListener(onNative);
-  native.onDisconnect.addListener(() => {
-    native = null;
-    failHost();
+  native = port;
+  port.onMessage.addListener((message) => {
+    if (native === port) onNative(message as Envelope);
   });
-  void handshake();
+  port.onDisconnect.addListener(() => {
+    if (native === port) failHost();
+  });
+  void handshake(port);
 }
 
-async function handshake(): Promise<void> {
+async function handshake(port: Browser.runtime.Port): Promise<void> {
   try {
     const response = await request("HANDSHAKE", {});
     if (!response.ok) {
@@ -121,15 +136,16 @@ async function handshake(): Promise<void> {
     state.updateWarning = payload.updateWarning || null;
     if (typeof payload.autoUpdate === "boolean") {
       state.settings = { ...state.settings, autoUpdate: payload.autoUpdate };
+      await persist("settings");
     }
     retryMs = 1000;
     await refreshJobs();
     await refreshDisk();
-    if (state.page && !state.info) void loadInfo(state.page);
+    if (state.page) ensureInfo(state.page);
     broadcast();
     armDiskTimer();
   } catch {
-    failHost();
+    if (native === port) failHost();
   }
 }
 
@@ -138,59 +154,72 @@ function notify(text: string): void {
   state.noticeId += 1;
 }
 
-function failHost(): void {
+// dropHost closes the current connection and fails whatever was waiting on it.
+function dropHost(): void {
+  const port = native;
   native = null;
+  port?.disconnect();
+  for (const waiter of pending.values()) {
+    clearTimeout(waiter.timer);
+    waiter.reject(new Error("disconnected"));
+  }
+  pending.clear();
+  cancelLookup();
+}
+
+function failHost(): void {
+  dropHost();
   if (state.host !== "incompatible") state.host = "disconnected";
   state.handshake = state.host === "incompatible" ? state.handshake : null;
   broadcast();
   if (state.host === "disconnected") {
+    if (retryTimer) clearTimeout(retryTimer);
     retryTimer = setTimeout(connect, retryMs);
     retryMs = Math.min(retryMs * 2, 30_000);
   }
 }
 
 function onNative(message: Envelope): void {
-  const waiter = pending.get(message.id);
-  if (waiter && message.type !== "JOB_PROGRESS" && message.type !== "JOB_STATE") {
-    clearTimeout(waiter.timer);
-    pending.delete(message.id);
-    waiter.resolve(message);
-    return;
+  switch (message.type) {
+    case "JOB_PROGRESS":
+      applyProgress(message.payload as Progress);
+      return;
+    case "JOB_STATE":
+      applyJobState((message.payload as { job: Job }).job);
+      return;
+    case "JOB_REMOVED":
+      removeJob((message.payload as { jobId: string }).jobId);
+      return;
+    case "CORE_STATUS":
+      applyCoreStatus(message);
+      return;
   }
-  if (message.type === "JOB_PROGRESS" || message.type === "JOB_STATE") applyJobEvent(message);
-  if (message.type === "CORE_STATUS") applyCoreStatus(message);
+  const waiter = pending.get(message.id);
+  if (!waiter) return;
+  clearTimeout(waiter.timer);
+  pending.delete(message.id);
+  waiter.resolve(message);
 }
 
-function applyJobEvent(message: Envelope): void {
-  const payload = message.payload as {
-    job?: Job;
-    jobId?: string;
-    percent?: number;
-    stage?: string;
-    bytesDone?: number;
-    bytesTotal?: number;
-    speedBps?: number;
-    etaSec?: number | null;
-  };
-  if (payload.job) {
-    upsertJob(payload.job);
-  } else if (payload.jobId) {
-    state.jobs = state.jobs.map((job) =>
-      job.id === payload.jobId
-        ? {
-            ...job,
-            stage: payload.stage ?? job.stage,
-            percent: payload.percent ?? job.percent,
-            bytesDone: payload.bytesDone ?? job.bytesDone,
-            bytesTotal: payload.bytesTotal ?? job.bytesTotal,
-            speedBps: payload.speedBps ?? job.speedBps,
-            etaSec: payload.etaSec === undefined ? job.etaSec : payload.etaSec,
-            state: payload.stage && isStage(payload.stage) ? payload.stage : job.state,
-          }
-        : job,
-    );
-  }
-  if (message.type === "JOB_STATE") void persist();
+// Progress arrives several times a second, so only the changed job is sent on.
+function applyProgress(progress: Progress): void {
+  const current = state.jobs.find((job) => job.id === progress.jobId);
+  if (!current) return;
+  const job = withProgress(current, progress);
+  state.jobs = replaceJob(state.jobs, job);
+  for (const port of popups) port.postMessage({ type: "JOB", job });
+}
+
+function applyJobState(job: Job): void {
+  upsertJob(job);
+  void persist("jobs");
+  broadcast();
+}
+
+function removeJob(jobId: string): void {
+  state.jobs = state.jobs.filter((job) => job.id !== jobId);
+  state.hiddenJobIds = state.hiddenJobIds.filter((id) => id !== jobId);
+  void persist("jobs", "hiddenJobIds");
   broadcast();
 }
 
@@ -206,9 +235,8 @@ function applyCoreStatus(message: Envelope): void {
 }
 
 function upsertJob(job: Job): void {
-  const index = state.jobs.findIndex((item) => item.id === job.id);
-  if (index === -1) state.jobs = [job, ...state.jobs];
-  else state.jobs = state.jobs.map((item) => (item.id === job.id ? job : item));
+  if (state.jobs.some((item) => item.id === job.id)) state.jobs = replaceJob(state.jobs, job);
+  else state.jobs = [job, ...state.jobs];
 }
 
 async function onPopup(message: PopupMessage): Promise<void> {
@@ -217,6 +245,7 @@ async function onPopup(message: PopupMessage): Promise<void> {
       broadcast();
       return;
     case "ACTIVE_TAB":
+      watchedTabId = message.tabId ?? null;
       applyActiveTab(message.url, message.title);
       return;
     case "ENQUEUE":
@@ -230,9 +259,9 @@ async function onPopup(message: PopupMessage): Promise<void> {
     case "CLEAR_DONE":
       state.hiddenJobIds = unique([
         ...state.hiddenJobIds,
-        ...state.jobs.filter((job) => ["done", "failed", "cancelled"].includes(job.state)).map((job) => job.id),
+        ...state.jobs.filter(isFinished).map((job) => job.id),
       ]);
-      await persist();
+      await persist("hiddenJobIds");
       broadcast();
       return;
     case "CLEAR_HISTORY":
@@ -240,7 +269,7 @@ async function onPopup(message: PopupMessage): Promise<void> {
         ...state.hiddenJobIds,
         ...state.jobs.filter((job) => job.state === "done").map((job) => job.id),
       ]);
-      await persist();
+      await persist("hiddenJobIds");
       broadcast();
       return;
     case "OPEN_FOLDER":
@@ -259,7 +288,7 @@ async function onPopup(message: PopupMessage): Promise<void> {
       return;
     case "UPDATE_SETTINGS":
       state.settings = { ...state.settings, ...message.settings };
-      await persist();
+      await persist("settings");
       broadcast();
       return;
     case "PICK_DIRECTORY":
@@ -292,7 +321,7 @@ async function enqueue(message: Extract<PopupMessage, { type: "ENQUEUE" }>): Pro
     return;
   }
   const key = audio ? `${state.info.id}:audio:${container}` : `${state.info.id}:${height}:${container}`;
-  const existing = state.jobs.find((job) => job.key === key && !["done", "failed", "cancelled"].includes(job.state));
+  const existing = state.jobs.find((job) => job.key === key && !isFinished(job));
   if (existing) {
     state.focusJobId = existing.id;
     notify("Already in queue");
@@ -324,7 +353,7 @@ async function enqueue(message: Extract<PopupMessage, { type: "ENQUEUE" }>): Pro
     upsertJob(payload.job);
     state.focusJobId = payload.job.id;
     notify(payload.already ? "Already in queue" : "Added to queue");
-    await persist();
+    await persist("jobs");
     broadcast();
   } catch {
     notify("The companion didn't answer.");
@@ -340,7 +369,8 @@ function applyActiveTab(url?: string, title?: string): void {
   }
   applyPage({
     ...parsed,
-    title: title?.replace(/ - YouTube$/, "") || state.page?.title || "",
+    title:
+      title?.replace(/ - YouTube$/, "") || (state.page?.videoId === parsed.videoId ? state.page.title : ""),
     channel: state.page?.videoId === parsed.videoId ? state.page.channel : "",
     thumbnail:
       state.page?.videoId === parsed.videoId && state.page.thumbnail
@@ -353,46 +383,61 @@ function applyPage(page: PageVideo): void {
   const same = state.page?.videoId === page.videoId;
   state.page = same && state.page ? { ...state.page, ...page } : page;
   if (!same) {
+    cancelLookup();
     state.info = null;
     state.infoError = null;
     const cached = cache.get(page.videoId);
     if (cached && isFresh(cached.fetchedAt) && cached.presets) state.info = cached;
   }
-  if (!state.info && state.host === "ready") void loadInfo(page);
+  ensureInfo(page);
   broadcast();
 }
 
 function clearPage(): void {
-  generation += 1;
+  cancelLookup();
   state.page = null;
   state.info = null;
-  state.infoLoading = false;
   state.infoError = null;
   broadcast();
 }
 
+function cancelLookup(): void {
+  lookup += 1;
+  loadingId = null;
+  state.infoLoading = false;
+}
+
+// A lookup starts a yt-dlp process, so it runs only while the popup is open and
+// only once per video at a time.
+function ensureInfo(page: PageVideo): void {
+  if (state.info || popups.size === 0 || state.host !== "ready" || loadingId === page.videoId) return;
+  void loadInfo(page);
+}
+
 async function loadInfo(page: PageVideo): Promise<void> {
-  const token = ++generation;
+  const token = ++lookup;
+  loadingId = page.videoId;
   state.infoLoading = true;
   state.infoError = null;
   broadcast();
   try {
     const response = await request("GET_INFO", { url: page.url });
-    if (token !== generation) return;
+    if (token !== lookup) return;
+    loadingId = null;
+    state.infoLoading = false;
     if (!response.ok) {
       state.infoError = response.error ?? { code: "EXTRACTION_FAILED", message: "StreamGrab couldn't read this video." };
-      state.infoLoading = false;
       broadcast();
       return;
     }
     const info = { ...(response.payload as Omit<VideoInfo, "fetchedAt">), fetchedAt: Date.now() };
     state.info = info;
-    state.infoLoading = false;
     cache.set(info.id, info);
-    await persist();
     broadcast();
+    await persist("cache");
   } catch {
-    if (token !== generation) return;
+    if (token !== lookup) return;
+    loadingId = null;
     state.infoLoading = false;
     state.infoError = { code: "NETWORK_ERROR", message: "The companion didn't answer." };
     broadcast();
@@ -403,8 +448,11 @@ async function refreshJobs(): Promise<void> {
   const response = await request("LIST_JOBS", {});
   if (!response.ok) return;
   const payload = response.payload as { jobs?: Job[] };
-  if (payload.jobs) state.jobs = payload.jobs;
-  await persist();
+  if (!payload.jobs) return;
+  state.jobs = payload.jobs;
+  const known = new Set(payload.jobs.map((job) => job.id));
+  state.hiddenJobIds = state.hiddenJobIds.filter((id) => known.has(id));
+  await persist("jobs", "hiddenJobIds");
 }
 
 async function refreshDisk(): Promise<void> {
@@ -416,7 +464,7 @@ async function refreshDisk(): Promise<void> {
 function armDiskTimer(): void {
   if (diskTimer) clearInterval(diskTimer);
   diskTimer = setInterval(() => {
-    if (state.jobs.some((job) => activeState(job.state))) void refreshDisk().then(broadcast);
+    if (state.jobs.some(isLive)) void refreshDisk().then(broadcast);
   }, 30_000);
 }
 
@@ -466,40 +514,37 @@ async function pickDirectory(): Promise<void> {
 function request(type: string, payload: unknown, timeoutMs = 60_000): Promise<Envelope> {
   if (!native) return Promise.reject(new Error("disconnected"));
   const id = crypto.randomUUID();
-  const generationNow = generation;
   return new Promise((resolve, reject) => {
     const timer = setTimeout(() => {
       pending.delete(id);
       reject(new Error("timeout"));
     }, timeoutMs);
-    pending.set(id, { resolve, reject, timer, generation: generationNow });
+    pending.set(id, { resolve, reject, timer });
     native?.postMessage({ id, type, payload });
   });
 }
 
-async function persist(): Promise<void> {
-  const fresh = [...cache.values()].filter((entry) => Date.now() - entry.fetchedAt < CACHE_MS);
-  await browser.storage.local.set({
-    streamgrab: { cache: fresh, jobs: state.jobs, hiddenJobIds: state.hiddenJobIds, settings: state.settings },
-  });
+async function persist(...parts: Part[]): Promise<void> {
+  for (const [id, entry] of cache) {
+    if (Date.now() - entry.fetchedAt >= CACHE_MS) cache.delete(id);
+  }
+  const values = {
+    cache: [...cache.values()],
+    jobs: state.jobs,
+    hiddenJobIds: state.hiddenJobIds,
+    settings: state.settings,
+  };
+  await browser.storage.local.set(toStored(values, parts));
 }
 
+// postMessage copies the snapshot, so it isn't cloned first.
 function broadcast(): void {
-  const snapshot = structuredClone(state);
-  for (const port of popups) port.postMessage({ type: "SNAPSHOT", snapshot });
+  for (const port of popups) port.postMessage({ type: "SNAPSHOT", snapshot: state });
 }
 
 function parse(url?: string): Pick<PageVideo, "videoId" | "url" | "kind"> | null {
   const parsed = parseYouTubeUrl(url);
   return parsed ? { videoId: parsed.videoId, url: parsed.url, kind: parsed.kind } : null;
-}
-
-function activeState(stateName: string): boolean {
-  return ["downloading_video", "downloading_audio", "muxing", "paused"].includes(stateName);
-}
-
-function isStage(value: string): value is Job["state"] {
-  return ["queued", "downloading_video", "downloading_audio", "muxing", "paused"].includes(value);
 }
 
 function unique(values: string[]): string[] {

@@ -31,7 +31,11 @@ type Server struct {
 	CoreDir      string
 	SettingsPath string
 	AutoUpdate   bool
+	// mu guards Versions and AutoUpdate once the server is running.
 	mu           sync.Mutex
+	writeMu      sync.Mutex
+	lookupMu     sync.Mutex
+	cancelLookup context.CancelFunc
 	updateMu     sync.Mutex
 	coreOnce     sync.Once
 }
@@ -56,14 +60,20 @@ func (s *Server) Serve(ctx context.Context) error {
 		if err != nil {
 			continue
 		}
-		go s.dispatch(ctx, msg)
+		// Queue commands are quick and are handled in the order they arrive.
+		switch msg.Type {
+		case "ENQUEUE", "PAUSE", "RESUME", "CANCEL", "RETRY_MUX":
+			s.dispatch(ctx, msg)
+		default:
+			go s.dispatch(ctx, msg)
+		}
 	}
 }
 
 func (s *Server) dispatch(ctx context.Context, msg protocol.Incoming) {
 	switch msg.Type {
 	case "HANDSHAKE":
-		s.reply(msg, s.Versions, nil)
+		s.reply(msg, s.handshake(), nil)
 		go s.scheduleCoreUpdate(ctx)
 	case "UPDATE_CORE":
 		s.updateCore(ctx, msg)
@@ -99,7 +109,8 @@ func (s *Server) dispatch(ctx context.Context, msg protocol.Incoming) {
 			Path string `json:"path"`
 		}
 		_ = json.Unmarshal(msg.Payload, &body)
-		if !inside(s.Jobs.DownloadDir(), body.Path) {
+		// Downloads made before the folder was changed are still ours to show.
+		if !inside(s.Jobs.DownloadDir(), body.Path) && !s.Jobs.HasOutput(body.Path) {
 			s.reply(msg, nil, &protocol.Error{Code: "PATH_UNWRITABLE", Message: "That file is outside the download folder."})
 			return
 		}
@@ -122,7 +133,7 @@ func (s *Server) getInfo(ctx context.Context, msg protocol.Incoming) {
 		s.reply(msg, nil, &protocol.Error{Code: "UNKNOWN", Message: "Open a YouTube video to get started."})
 		return
 	}
-	infoCtx, cancel := context.WithTimeout(ctx, 45*time.Second)
+	infoCtx, cancel := s.beginLookup(ctx)
 	defer cancel()
 	probe, err := s.readInfo(infoCtx, parsed.URL)
 	if err != nil {
@@ -217,9 +228,9 @@ func (s *Server) pickDirectory(msg protocol.Incoming) {
 		s.reply(msg, nil, asAPI(err))
 		return
 	}
-	s.Versions.DownloadDir = s.Jobs.DownloadDir()
-	free, _ := platform.FreeBytes(s.Versions.DownloadDir)
-	s.reply(msg, map[string]any{"path": s.Versions.DownloadDir, "freeBytes": free}, nil)
+	dir := s.Jobs.DownloadDir()
+	free, _ := platform.FreeBytes(dir)
+	s.reply(msg, map[string]any{"path": dir, "freeBytes": free}, nil)
 }
 
 func (s *Server) jobAction(msg protocol.Incoming, fn func(string) error) {
@@ -240,16 +251,43 @@ func (s *Server) reply(msg protocol.Incoming, payload any, err error) {
 		out.Error = asAPI(err)
 		out.Payload = nil
 	}
-	_ = s.write(out)
+	if errors.Is(s.write(out), protocol.ErrTooLarge) {
+		_ = s.write(protocol.Outgoing{ID: msg.ID, Type: msg.Type, Error: &protocol.Error{Code: "UNKNOWN", Message: "The reply was too large for the browser."}})
+	}
 }
 
 func (s *Server) write(msg protocol.Outgoing) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
 	return protocol.WriteMessage(s.Out, msg)
 }
 
+func (s *Server) handshake() protocol.Handshake {
+	dir := s.Jobs.DownloadDir()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := s.Versions
+	out.DownloadDir = dir
+	return out
+}
+
+// beginLookup starts a video lookup and cancels the one before it, because the
+// popup only ever shows the latest video.
+func (s *Server) beginLookup(ctx context.Context) (context.Context, context.CancelFunc) {
+	ctx, cancel := context.WithTimeout(ctx, 45*time.Second)
+	s.lookupMu.Lock()
+	defer s.lookupMu.Unlock()
+	if s.cancelLookup != nil {
+		s.cancelLookup()
+	}
+	s.cancelLookup = cancel
+	return ctx, cancel
+}
+
 func eventPayload(event jobs.Event) any {
+	if event.Type == "JOB_REMOVED" {
+		return map[string]any{"jobId": event.Job.ID}
+	}
 	if event.Type == "JOB_PROGRESS" {
 		return protocol.ProgressPayload{
 			JobID:      event.Job.ID,
@@ -409,7 +447,7 @@ func (s *Server) runCoreUpdate(ctx context.Context, force bool) (update.Result, 
 	s.mu.Lock()
 	s.Versions.UpdateWarning = warning
 	if err == nil && result.Path != "" && s.Runner != nil {
-		s.Runner.YtDlpPath = result.Path
+		s.Runner.SetYtDlpPath(result.Path)
 		if result.Version != "" {
 			s.Versions.YtDlpVersion = result.Version
 		}

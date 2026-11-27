@@ -2,6 +2,7 @@ package media
 
 import (
 	"math"
+	"strconv"
 	"strings"
 )
 
@@ -252,9 +253,9 @@ func flacRow(probe Probe, source Format, origin string) AudioRow {
 	if source.ASR > 0 && source.ASR < 48000 {
 		rate = source.ASR
 		if source.ASR%1000 == 0 {
-			spec = "24-bit, " + itoa(source.ASR/1000) + " kHz"
+			spec = "24-bit, " + strconv.Itoa(source.ASR/1000) + " kHz"
 		} else {
-			spec = "24-bit, " + itoa(source.ASR) + " Hz"
+			spec = "24-bit, " + strconv.Itoa(source.ASR) + " Hz"
 		}
 	}
 	size := int64(0)
@@ -680,19 +681,5 @@ func spokenAudio(f Format) string {
 }
 
 func trimFloat(value float64) string {
-	return itoa(int(math.Round(value)))
-}
-
-func itoa(n int) string {
-	if n == 0 {
-		return "0"
-	}
-	var digits [16]byte
-	i := len(digits)
-	for n > 0 {
-		i--
-		digits[i] = byte('0' + n%10)
-		n /= 10
-	}
-	return string(digits[i:])
+	return strconv.Itoa(int(math.Round(value)))
 }

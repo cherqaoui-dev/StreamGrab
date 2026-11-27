@@ -26,3 +26,17 @@ func TestIgnoresNA(t *testing.T) {
 		t.Fatalf("%+v", got)
 	}
 }
+
+func TestParseLineRecordsThumbnails(t *testing.T) {
+	for line, want := range map[string]string{
+		`[info] Writing video thumbnail 41 to: C:\v\A [id].webp`:                  `C:\v\A [id].webp`,
+		`[youtube] id: Writing thumbnail to: C:\v\A [id].jpg`:                     `C:\v\A [id].jpg`,
+		`[ThumbnailsConvertor] Converting thumbnail "C:\v\A [id].webp" to jpg`:    `C:\v\A [id].jpg`,
+		`[info] Writing video metadata as JSON to: C:\v\thumbnail [id].info.json`: "",
+		`[download] Destination: C:\v\Writing thumbnail to: x [id].f137.mp4`:      `C:\v\Writing thumbnail to: x [id].f137.mp4`,
+	} {
+		if got := ParseLine(line, Progress{}).File; got != want {
+			t.Errorf("%s: file = %q, want %q", line, got, want)
+		}
+	}
+}

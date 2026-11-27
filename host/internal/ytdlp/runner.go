@@ -1,24 +1,23 @@
 package ytdlp
 
 import (
-	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
-	"regexp"
 	"runtime"
 	"strconv"
 	"strings"
 	"sync"
 
+	"streamgrab/host/internal/failure"
 	"streamgrab/host/internal/jobs"
 	"streamgrab/host/internal/media"
+	"streamgrab/host/internal/platform"
 	"streamgrab/host/internal/protocol"
 )
 
@@ -30,149 +29,247 @@ type Versions struct {
 }
 
 type Runner struct {
+	// YtDlpPath is set at construction. Use SetYtDlpPath once the runner is shared.
 	YtDlpPath   string
 	FFmpegPath  string
 	DownloadDir string
-	Dir         *string
 	Prefix      []string
+	mu          sync.RWMutex
 }
 
-func (r Runner) Probe(ctx context.Context) Versions {
+// SetYtDlpPath switches to another yt-dlp, for example after an update.
+func (r *Runner) SetYtDlpPath(path string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.YtDlpPath = path
+}
+
+func (r *Runner) ytDlp() string {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return r.YtDlpPath
+}
+
+// Probe reads the tool versions. The tools are queried at the same time because
+// each one can take seconds to start.
+func (r *Runner) Probe(ctx context.Context) Versions {
 	deno := DenoPath()
-	return Versions{
-		YtDlp:   commandVersion(ctx, r.YtDlpPath, r.Prefix),
-		FFmpeg:  commandVersion(ctx, r.FFmpegPath, nil),
-		Deno:    commandVersion(ctx, deno, []string{"--version"}),
-		HasDeno: deno != "",
+	versions := Versions{HasDeno: deno != ""}
+	var wg sync.WaitGroup
+	query := func(target *string, path string, args []string) {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			*target = commandVersion(ctx, path, args)
+		}()
 	}
+	query(&versions.YtDlp, r.ytDlp(), r.Prefix)
+	query(&versions.FFmpeg, r.FFmpegPath, nil)
+	query(&versions.Deno, deno, []string{"--version"})
+	wg.Wait()
+	return versions
 }
 
-func (r Runner) Info(ctx context.Context, page string) (media.Probe, error) {
-	if r.YtDlpPath == "" {
+func (r *Runner) Info(ctx context.Context, page string) (media.Probe, error) {
+	tool := r.ytDlp()
+	if tool == "" {
 		return media.Probe{}, &protocol.Error{Code: "EXTRACTION_FAILED", Message: "yt-dlp was not found on PATH."}
 	}
-	cmd := exec.CommandContext(ctx, r.YtDlpPath, append(r.Prefix, "-J", "--no-playlist", "--no-warnings", page)...)
+	args := append(append([]string{}, r.Prefix...), "-J", "--no-playlist", "--no-warnings", "--encoding", "utf-8", page)
+	cmd := exec.CommandContext(ctx, tool, args...)
 	applyDenoEnv(cmd)
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
-	if err := cmd.Run(); err != nil {
-		return media.Probe{}, classify(stderr.String() + err.Error())
+	tree, err := platform.StartTree(cmd)
+	if err != nil {
+		return media.Probe{}, classify(err.Error())
+	}
+	defer tree.Close()
+	if err := cmd.Wait(); err != nil && !errors.Is(err, exec.ErrWaitDelay) {
+		return media.Probe{}, classify(stderr.String() + "\n" + err.Error())
 	}
 	return decodeProbe(stdout.Bytes())
 }
 
-func (r Runner) Start(ctx context.Context, job jobs.Job, onProgress func(media.Progress)) (jobs.Handle, error) {
+func (r *Runner) Start(ctx context.Context, job jobs.Job, onProgress func(media.Progress)) (jobs.Handle, error) {
 	if job.RetryMux {
 		return r.remux(ctx, job, onProgress)
 	}
-	if r.YtDlpPath == "" {
+	tool := r.ytDlp()
+	if tool == "" {
 		return nil, &protocol.Error{Code: "EXTRACTION_FAILED", Message: "yt-dlp was not found on PATH."}
+	}
+	dir := r.outputDir(job)
+	if job.Kind == "audio" {
+		removeUnfinishedOutput(dir, job)
 	}
 	args, err := r.arguments(job)
 	if err != nil {
 		return nil, err
 	}
-	runCtx, cancel := context.WithCancel(ctx)
-	cmd := exec.CommandContext(runCtx, r.YtDlpPath, args...)
+	cmd := exec.Command(tool, args...)
 	applyDenoEnv(cmd)
-	stdout, err := cmd.StdoutPipe()
-	if err != nil {
-		cancel()
-		return nil, err
+
+	var mu sync.Mutex
+	var progress media.Progress
+	if job.Kind == "audio" {
+		progress.Stage = "downloading_audio"
 	}
-	stderr, err := cmd.StderrPipe()
-	if err != nil {
-		cancel()
-		return nil, err
-	}
-	if err := cmd.Start(); err != nil {
-		cancel()
-		return nil, err
-	}
-	handle := &execHandle{cmd: cmd, cancel: cancel, done: make(chan error, 1)}
-	go func() {
-		var progress media.Progress
-		if job.Kind == "audio" {
-			progress.Stage = "downloading_audio"
+	var stderr tail
+	read := func(line string) {
+		mu.Lock()
+		defer mu.Unlock()
+		next := media.ParseLine(line, progress)
+		changed := next.Stage != progress.Stage || next.BytesDone != progress.BytesDone || next.File != progress.File || next.OutputPath != progress.OutputPath || next.SawMerger != progress.SawMerger
+		progress = next
+		if changed && onProgress != nil {
+			onProgress(next)
 		}
-		var progressMu sync.Mutex
-		var stderrBuf strings.Builder
-		var stderrMu sync.Mutex
-		var wg sync.WaitGroup
-		wg.Add(2)
-		scan := func(reader io.Reader, errOut bool) {
-			defer wg.Done()
-			scanner := bufio.NewScanner(reader)
-			scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
-			for scanner.Scan() {
-				line := scanner.Text()
-				if errOut {
-					stderrMu.Lock()
-					stderrBuf.WriteString(line)
-					stderrBuf.WriteByte('\n')
-					stderrMu.Unlock()
-				}
-				progressMu.Lock()
-				next := media.ParseLine(line, progress)
-				changed := next.Stage != progress.Stage || next.BytesDone != progress.BytesDone || next.OutputPath != progress.OutputPath || next.SawMerger != progress.SawMerger
-				progress = next
-				progressMu.Unlock()
-				if changed && onProgress != nil {
-					onProgress(next)
-				}
-			}
-		}
-		go scan(stdout, false)
-		go scan(stderr, true)
-		waitErr := cmd.Wait()
-		wg.Wait()
-		stderrMu.Lock()
-		text := stderrBuf.String()
-		stderrMu.Unlock()
-		progressMu.Lock()
+	}
+	return launch(ctx, cmd, read, func(line string) {
+		stderr.add(line)
+		read(line)
+	}, func(waitErr error) (string, error) {
+		mu.Lock()
 		final := progress
-		progressMu.Unlock()
-		handle.mu.Lock()
-		handle.path = final.OutputPath
-		if handle.path == "" {
-			handle.path = findOutput(r.outputDir(), job.VideoID, job.Container)
-		}
-		handle.mu.Unlock()
+		mu.Unlock()
 		if waitErr != nil {
-			if final.SawMerger {
-				waitErr = errors.New("mux " + text)
-			} else if text != "" {
-				waitErr = errors.New(text)
-			}
+			return "", downloadError(stderr.String(), waitErr, final.SawMerger)
 		}
-		handle.done <- waitErr
+		path := final.OutputPath
+		if _, err := os.Stat(path); path == "" || err != nil {
+			path = findOutput(dir, job.VideoID, job.Container)
+		}
+		return path, nil
+	})
+}
+
+func downloadError(output string, waitErr error, sawMerger bool) error {
+	if strings.TrimSpace(output) == "" {
+		output = waitErr.Error()
+	}
+	result := failure.Classify(output)
+	if sawMerger && result.Code != "DISK_FULL" && result.Code != "NETWORK_ERROR" {
+		return &protocol.Error{Code: "MUX_FAILED", Message: "Muxing failed. The partial streams were kept."}
+	}
+	return result
+}
+
+// removeUnfinishedOutput deletes a converted file that an earlier attempt of
+// this job left behind. yt-dlp would otherwise accept it as complete.
+func removeUnfinishedOutput(dir string, job jobs.Job) {
+	for _, file := range job.Files {
+		if filepath.Clean(filepath.Dir(file)) == filepath.Clean(dir) && strings.EqualFold(filepath.Ext(file), "."+job.Container) && !media.IsPartial(filepath.Base(file)) {
+			_ = os.Remove(file)
+		}
+	}
+}
+
+// launch starts cmd and reports its output line by line. result turns the exit
+// status into the finished file's path or an error.
+func launch(ctx context.Context, cmd *exec.Cmd, stdout, stderr func(string), result func(error) (string, error)) (jobs.Handle, error) {
+	runCtx, cancel := context.WithCancel(ctx)
+	command := exec.CommandContext(runCtx, cmd.Path, cmd.Args[1:]...)
+	command.Env = cmd.Env
+	out := &lineWriter{emit: stdout}
+	errOut := &lineWriter{emit: stderr}
+	command.Stdout = out
+	command.Stderr = errOut
+	tree, err := platform.StartTree(command)
+	if err != nil {
+		cancel()
+		return nil, err
+	}
+	handle := &execHandle{pid: command.Process.Pid, cancel: cancel, done: make(chan error, 1)}
+	go func() {
+		defer cancel()
+		// Wait returns only after all output has been copied to the writers.
+		waitErr := command.Wait()
+		if errors.Is(waitErr, exec.ErrWaitDelay) {
+			waitErr = nil
+		}
+		tree.Close()
+		out.flush()
+		errOut.flush()
+		path, err := result(waitErr)
+		handle.mu.Lock()
+		handle.path = path
+		handle.mu.Unlock()
+		handle.done <- err
 	}()
 	return handle, nil
 }
 
+// lineWriter splits process output into lines.
+type lineWriter struct {
+	buf  []byte
+	emit func(string)
+}
+
+const maxLine = 1 << 20
+
+func (w *lineWriter) Write(data []byte) (int, error) {
+	w.buf = append(w.buf, data...)
+	for {
+		i := bytes.IndexByte(w.buf, '\n')
+		if i < 0 {
+			break
+		}
+		w.emit(strings.TrimSuffix(string(w.buf[:i]), "\r"))
+		w.buf = w.buf[i+1:]
+	}
+	if len(w.buf) > maxLine {
+		w.flush()
+	}
+	return len(data), nil
+}
+
+func (w *lineWriter) flush() {
+	if len(w.buf) > 0 {
+		w.emit(strings.TrimSuffix(string(w.buf), "\r"))
+		w.buf = nil
+	}
+}
+
+// tail keeps the end of a process's error output.
+type tail struct {
+	mu   sync.Mutex
+	text string
+}
+
+const maxTail = 32 << 10
+
+func (t *tail) add(line string) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.text += line + "\n"
+	if len(t.text) > maxTail {
+		t.text = t.text[len(t.text)-maxTail:]
+	}
+}
+
+func (t *tail) String() string {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.text
+}
+
 type execHandle struct {
-	cmd    *exec.Cmd
+	pid    int
 	cancel context.CancelFunc
 	done   chan error
 	mu     sync.Mutex
 	path   string
 }
 
-func (h *execHandle) PID() int {
-	if h.cmd.Process == nil {
-		return 0
-	}
-	return h.cmd.Process.Pid
-}
+func (h *execHandle) PID() int { return h.pid }
 
 func (h *execHandle) Wait() error { return <-h.done }
 
+// Kill stops the process and everything it started.
 func (h *execHandle) Kill() error {
 	h.cancel()
-	if h.cmd.Process != nil {
-		_ = h.cmd.Process.Kill()
-	}
 	return nil
 }
 
@@ -249,40 +346,15 @@ func decodeProbe(raw []byte) (media.Probe, error) {
 }
 
 func classify(text string) error {
-	lower := strings.ToLower(text)
+	result := failure.Classify(text)
 	switch {
-	case strings.Contains(lower, "drm"):
-		return &protocol.Error{Code: "DRM_PROTECTED", Message: "StreamGrab doesn't support DRM content."}
-	case strings.Contains(lower, "confirm your age"), strings.Contains(lower, "age-restricted"), strings.Contains(lower, "sign in to confirm"):
-		return &protocol.Error{Code: "AGE_RESTRICTED", Message: "This video is age-restricted. Browser cookies are not enabled in this version."}
-	case strings.Contains(lower, "live event"), strings.Contains(lower, "is live"):
-		return &protocol.Error{Code: "LIVE_STREAM", Message: "This live stream can't be downloaded in this version."}
-	case strings.Contains(lower, "javascript runtime"), strings.Contains(lower, "challenge solving failed"), strings.Contains(lower, "signature solving failed"):
-		return &protocol.Error{Code: "EXTRACTION_FAILED", Message: "StreamGrab couldn't read this video because Deno was not available to yt-dlp."}
-	case strings.Contains(lower, "network"), strings.Contains(lower, "timed out"):
-		return &protocol.Error{Code: "NETWORK_ERROR", Message: "The network request failed."}
-	default:
-		message := "StreamGrab couldn't read this video."
-		if reason := clipReason(text); reason != "" {
-			message += " " + reason
-		}
-		return &protocol.Error{Code: "EXTRACTION_FAILED", Message: message}
+	case result.Code == "NETWORK_ERROR":
+		result.Message = "The network request failed."
+	case strings.HasPrefix(result.Message, "The download failed."):
+		reason := strings.TrimPrefix(result.Message, "The download failed. Update yt-dlp and try again.")
+		result.Message = "StreamGrab couldn't read this video." + reason
 	}
-}
-
-func clipReason(text string) string {
-	for _, line := range strings.Split(text, "\n") {
-		line = strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(line), "ERROR:"))
-		lower := strings.ToLower(line)
-		if line == "" || strings.HasPrefix(lower, "warning:") || strings.Contains(lower, "http://") || strings.Contains(lower, "https://") {
-			continue
-		}
-		if len(line) > 160 {
-			line = line[:160]
-		}
-		return line
-	}
-	return ""
+	return result
 }
 
 func CommandVersion(ctx context.Context, path string) string {
@@ -315,20 +387,15 @@ func commandVersion(ctx context.Context, path string, prefix []string) string {
 	return line
 }
 
-func look(name string) bool {
-	_, err := exec.LookPath(name)
-	return err == nil
-}
-
-func (r Runner) outputDir() string {
-	if r.Dir != nil && strings.TrimSpace(*r.Dir) != "" {
-		return strings.TrimSpace(*r.Dir)
+func (r *Runner) outputDir(job jobs.Job) string {
+	if dir := strings.TrimSpace(job.Dir); dir != "" {
+		return dir
 	}
 	return r.DownloadDir
 }
 
-func (r Runner) arguments(job jobs.Job) ([]string, error) {
-	dir := r.outputDir()
+func (r *Runner) arguments(job jobs.Job) ([]string, error) {
+	dir := r.outputDir(job)
 	if dir == "" {
 		return nil, &protocol.Error{Code: "PATH_UNWRITABLE", Message: "Choose a download folder."}
 	}
@@ -337,7 +404,13 @@ func (r Runner) arguments(job jobs.Job) ([]string, error) {
 		ext = "mp4"
 	}
 	name := "%(title).180B [%(id)s]"
-	if n := nextSuffix(dir, job.VideoID, ext); n > 0 {
+	// Extracting audio first downloads a source file with another extension, so
+	// an audio job must avoid every existing file for the video.
+	collides := ext
+	if job.Kind == "audio" {
+		collides = ""
+	}
+	if n := nextSuffix(dir, job.VideoID, collides, job.Files); n > 0 {
 		name += fmt.Sprintf(" (%d)", n)
 	}
 	args := append([]string{}, r.Prefix...)
@@ -346,6 +419,10 @@ func (r Runner) arguments(job jobs.Job) ([]string, error) {
 		"--newline",
 		"--no-warnings",
 		"--no-overwrites",
+		"--encoding", "utf-8",
+		// --print silences other output unless these are given.
+		"--no-simulate", "--no-quiet", "--progress",
+		"--print", "after_move:"+media.FilePrefix+"%(filepath)s",
 		"--progress-template", "streamgrab:%(progress.downloaded_bytes)s:%(progress.total_bytes)s:%(progress.total_bytes_estimate)s:%(progress.speed)s:%(progress.eta)s",
 		"-o", filepath.Join(dir, name+".%(ext)s"),
 		"--paths", "home:"+dir,
@@ -362,6 +439,10 @@ func (r Runner) arguments(job jobs.Job) ([]string, error) {
 			container = "mp4"
 		}
 		args = append(args, "--merge-output-format", container, "-f", format)
+		if holdsCover(container) {
+			// YouTube serves WebP, which Windows can't show as a cover.
+			args = append(args, "--embed-thumbnail", "--convert-thumbnails", "jpg")
+		}
 		args = append(args, recodeArgs(job)...)
 	}
 	if runtime.GOOS == "windows" {
@@ -412,6 +493,26 @@ func audioArgs(job jobs.Job) []string {
 	return args
 }
 
+// holdsCover reports whether yt-dlp can embed a thumbnail in a video container.
+// It fails the download when asked to do that for WebM.
+func holdsCover(container string) bool {
+	return container == "mp4" || container == "mkv"
+}
+
+// findCover returns the thumbnail that yt-dlp saved beside a downloaded stream
+// and had not yet embedded, or "".
+func findCover(video, formatID string) string {
+	stem := strings.TrimSuffix(video, filepath.Ext(video))
+	if !strings.HasSuffix(stem, ".f"+formatID) {
+		return ""
+	}
+	path := strings.TrimSuffix(stem, ".f"+formatID) + ".jpg"
+	if info, err := os.Stat(path); err != nil || info.IsDir() || info.Size() == 0 {
+		return ""
+	}
+	return path
+}
+
 func recodeArgs(job jobs.Job) []string {
 	if !job.RecodeAudio {
 		return nil
@@ -438,7 +539,7 @@ func findOutput(dir, videoID, ext string) string {
 		if ext != "" {
 			suffix = "." + strings.ToLower(ext)
 		}
-		if entry.IsDir() || isStreamFragment(entry.Name()) || !strings.Contains(entry.Name(), videoID) || !strings.HasSuffix(strings.ToLower(entry.Name()), suffix) {
+		if entry.IsDir() || media.IsPartial(entry.Name()) || !strings.Contains(entry.Name(), videoID) || !strings.HasSuffix(strings.ToLower(entry.Name()), suffix) {
 			continue
 		}
 		info, err := entry.Info()
@@ -453,11 +554,15 @@ func findOutput(dir, videoID, ext string) string {
 	return match
 }
 
-var fragmentTail = regexp.MustCompile(`\.f[0-9]{2,4}\.[a-z0-9]+$`)
-
-func nextSuffix(dir, videoID, ext string) int {
+// nextSuffix returns the number to add to a new file name so that it doesn't
+// collide with an existing file. An empty ext matches every extension. Files in
+// own belong to the job being started and are ignored.
+func nextSuffix(dir, videoID, ext string, own []string) int {
 	marker := "[" + videoID + "]"
-	suffix := "." + strings.ToLower(ext)
+	mine := map[string]bool{}
+	for _, file := range own {
+		mine[strings.ToLower(filepath.Base(file))] = true
+	}
 	max := -1
 	entries, err := os.ReadDir(dir)
 	if err != nil {
@@ -465,7 +570,11 @@ func nextSuffix(dir, videoID, ext string) int {
 	}
 	for _, entry := range entries {
 		name := entry.Name()
-		if entry.IsDir() || isStreamFragment(name) || !strings.Contains(name, marker) || !strings.HasSuffix(strings.ToLower(name), suffix) {
+		if entry.IsDir() || media.IsPartial(name) || mine[strings.ToLower(name)] || !strings.Contains(name, marker) {
+			continue
+		}
+		suffix := filepath.Ext(name)
+		if ext != "" && !strings.EqualFold(suffix, "."+ext) {
 			continue
 		}
 		if n := collisionNumber(name, marker, suffix); n > max {
@@ -501,117 +610,137 @@ func collisionNumber(name, marker, ext string) int {
 	return n
 }
 
-func isStreamFragment(name string) bool {
-	lower := strings.ToLower(name)
-	if strings.HasSuffix(lower, ".part") || strings.HasSuffix(lower, ".ytdl") {
-		return true
-	}
-	return fragmentTail.MatchString(lower)
+// findStreams locates the downloaded video and audio streams of a job.
+func findStreams(dir string, job jobs.Job) (video, audio string) {
+	return findStream(dir, job, job.VideoFormatID), findStream(dir, job, job.AudioFormatID)
 }
 
-func findStreams(dir, videoID string) (string, string) {
+// findStream returns the file holding one format of the job's video, preferring
+// a file the job is known to have written.
+func findStream(dir string, job jobs.Job, formatID string) string {
+	if formatID == "" {
+		return ""
+	}
 	entries, err := os.ReadDir(dir)
 	if err != nil {
-		return "", ""
+		return ""
 	}
-	var video, audio string
-	var videoSize, audioSize int64
+	mine := map[string]bool{}
+	for _, file := range job.Files {
+		mine[filepath.Base(file)] = true
+	}
+	var match string
+	var newest int64
 	for _, entry := range entries {
 		name := entry.Name()
-		if entry.IsDir() || !strings.Contains(name, videoID) || !fragmentTail.MatchString(strings.ToLower(name)) {
+		stem := strings.TrimSuffix(name, filepath.Ext(name))
+		if entry.IsDir() || !strings.Contains(name, "["+job.VideoID+"]") || !strings.HasSuffix(stem, ".f"+formatID) {
+			continue
+		}
+		if ext := strings.ToLower(filepath.Ext(name)); ext == ".part" || ext == ".ytdl" {
 			continue
 		}
 		info, err := entry.Info()
-		if err != nil {
+		if err != nil || info.Size() == 0 {
 			continue
 		}
 		path := filepath.Join(dir, name)
-		if isAudioFragment(name) {
-			if info.Size() >= audioSize {
-				audio, audioSize = path, info.Size()
-			}
-			continue
+		if mine[name] {
+			return path
 		}
-		if info.Size() >= videoSize {
-			video, videoSize = path, info.Size()
+		if info.ModTime().UnixNano() >= newest {
+			newest, match = info.ModTime().UnixNano(), path
 		}
 	}
-	return video, audio
+	return match
 }
 
-func isAudioFragment(name string) bool {
-	lower := strings.ToLower(name)
-	switch {
-	case strings.HasSuffix(lower, ".m4a"), strings.HasSuffix(lower, ".opus"), strings.HasSuffix(lower, ".ogg"), strings.HasSuffix(lower, ".aac"), strings.HasSuffix(lower, ".mp3"), strings.HasSuffix(lower, ".flac"):
-		return true
-	default:
-		return strings.Contains(lower, ".f249.") || strings.Contains(lower, ".f250.") || strings.Contains(lower, ".f251.")
-	}
-}
-
-func (r Runner) remux(ctx context.Context, job jobs.Job, onProgress func(media.Progress)) (jobs.Handle, error) {
+func (r *Runner) remux(ctx context.Context, job jobs.Job, onProgress func(media.Progress)) (jobs.Handle, error) {
 	if r.FFmpegPath == "" {
 		return nil, &protocol.Error{Code: "MUX_FAILED", Message: "FFmpeg was not found. The partial streams were kept."}
 	}
-	dir := r.outputDir()
-	video, audio := findStreams(dir, job.VideoID)
-	if video == "" && audio == "" {
+	dir := r.outputDir(job)
+	video, audio := findStreams(dir, job)
+	if video == "" || (job.AudioFormatID != "" && audio == "") {
 		return nil, &protocol.Error{Code: "MUX_FAILED", Message: "The partial streams are no longer in the download folder."}
 	}
 	container := job.Container
 	if container == "" {
 		container = "mp4"
 	}
-	out := uniquePath(dir, job.Title, job.VideoID, container)
+	out := uniquePath(dir, job.Title, job.VideoID, container, job.Files)
 	rel, err := filepath.Rel(filepath.Clean(dir), filepath.Clean(out))
 	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
 		return nil, &protocol.Error{Code: "PATH_UNWRITABLE", Message: "The output path left the download folder."}
 	}
-	args := []string{"-y", "-hide_banner", "-loglevel", "error"}
-	if video != "" && audio != "" {
-		args = append(args, "-i", video, "-i", audio, "-map", "0:v:0", "-map", "1:a:0", "-c", "copy")
-	} else {
-		source := video
-		if source == "" {
-			source = audio
+	cover := ""
+	if holdsCover(container) {
+		cover = findCover(video, job.VideoFormatID)
+	}
+	args := []string{"-y", "-hide_banner", "-loglevel", "error", "-i", video}
+	inputs := 1
+	audioMap := "0:a?"
+	if audio != "" {
+		args = append(args, "-i", audio)
+		audioMap = "1:a:0"
+		inputs++
+	}
+	// An MP4 cover is a second video stream. Matroska stores it as an attachment.
+	coverStream := cover != "" && container == "mp4"
+	if coverStream {
+		args = append(args, "-i", cover)
+	}
+	if audio != "" || coverStream {
+		args = append(args, "-map", "0:v:0", "-map", audioMap)
+	}
+	if coverStream {
+		args = append(args, "-map", fmt.Sprintf("%d:v:0", inputs), "-disposition:v:1", "attached_pic")
+	}
+	if cover != "" && container == "mkv" {
+		args = append(args, "-attach", cover, "-metadata:s:t", "mimetype=image/jpeg", "-metadata:s:t", "filename=cover.jpg")
+	}
+	args = append(args, "-c", "copy")
+	if job.RecodeAudio {
+		switch container {
+		case "mp4":
+			args = append(args, "-c:a", "aac", "-b:a", "192k")
+		case "webm":
+			args = append(args, "-c:a", "libopus", "-b:a", "160k")
 		}
-		args = append(args, "-i", source, "-c", "copy")
 	}
 	if container == "mp4" {
 		args = append(args, "-movflags", "+faststart")
 	}
 	args = append(args, out)
 	if onProgress != nil {
-		onProgress(media.Progress{Stage: "muxing", Percent: 50})
+		onProgress(media.Progress{Stage: "muxing", Percent: 50, File: out})
 	}
-	cmd := exec.CommandContext(ctx, r.FFmpegPath, args...)
-	output, err := cmd.CombinedOutput()
-	if err != nil {
-		_ = os.Remove(out)
-		detail := strings.TrimSpace(string(output))
-		if detail == "" {
-			detail = err.Error()
+	var output tail
+	return launch(ctx, exec.Command(r.FFmpegPath, args...), output.add, output.add, func(waitErr error) (string, error) {
+		if waitErr != nil {
+			_ = os.Remove(out)
+			detail := strings.TrimSpace(output.String())
+			if detail == "" {
+				detail = waitErr.Error()
+			}
+			return "", &protocol.Error{Code: "MUX_FAILED", Message: "Muxing failed. The partial streams were kept. " + failure.Truncate(detail, 180)}
 		}
-		if len(detail) > 180 {
-			detail = detail[:180]
+		info, statErr := os.Stat(out)
+		if statErr != nil || info.Size() == 0 {
+			_ = os.Remove(out)
+			return "", &protocol.Error{Code: "MUX_FAILED", Message: "Muxing failed. The partial streams were kept."}
 		}
-		return nil, &protocol.Error{Code: "MUX_FAILED", Message: "Muxing failed. The partial streams were kept. " + detail}
-	}
-	info, statErr := os.Stat(out)
-	if statErr != nil || info.Size() == 0 {
-		_ = os.Remove(out)
-		return nil, &protocol.Error{Code: "MUX_FAILED", Message: "Muxing failed. The partial streams were kept."}
-	}
-	if onProgress != nil {
-		onProgress(media.Progress{Stage: "muxing", Percent: 100, OutputPath: out, SawMerger: true})
-	}
-	return doneHandle{path: out}, nil
+		if cover != "" {
+			_ = os.Remove(cover)
+		}
+		return out, nil
+	})
 }
 
-func uniquePath(dir, title, videoID, ext string) string {
+func uniquePath(dir, title, videoID, ext string, own []string) string {
 	base := safeTitle(title, videoID)
 	suffix := ""
-	if n := nextSuffix(dir, videoID, ext); n > 0 {
+	if n := nextSuffix(dir, videoID, ext, own); n > 0 {
 		suffix = fmt.Sprintf(" (%d)", n)
 	}
 	return filepath.Join(dir, fmt.Sprintf("%s [%s]%s.%s", base, videoID, suffix, ext))
@@ -625,23 +754,12 @@ func safeTitle(title, id string) string {
 		return r
 	}, title)
 	clean = strings.Trim(strings.TrimSpace(clean), ". ")
-	if len(clean) > 80 {
-		clean = strings.TrimSpace(clean[:80])
-	}
+	clean = strings.TrimSpace(failure.Truncate(clean, 80))
 	if clean == "" {
 		return id
 	}
 	return clean
 }
-
-type doneHandle struct {
-	path string
-}
-
-func (h doneHandle) PID() int           { return 0 }
-func (h doneHandle) Wait() error        { return nil }
-func (h doneHandle) Kill() error        { return nil }
-func (h doneHandle) OutputPath() string { return h.path }
 
 func PreferredBinary(dir string) string {
 	if path := managedBinary(dir); path != "" {
@@ -720,11 +838,4 @@ func prependPath(env []string, dir string) []string {
 		out = append(out, "PATH="+dir)
 	}
 	return out
-}
-
-func MustDir(path string) error {
-	if err := os.MkdirAll(path, 0o755); err != nil {
-		return fmt.Errorf("create download directory: %w", err)
-	}
-	return nil
 }

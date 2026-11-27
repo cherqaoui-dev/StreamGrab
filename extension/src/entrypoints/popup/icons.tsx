@@ -2,6 +2,7 @@ type IconProps = { name: string };
 
 const paths: Record<string, string> = {
   download: "M12 4v10M8 10l4 4 4-4M5 19h14",
+  back: "M19 12H5M11 6l-6 6 6 6",
   link: "M10 13a5 5 0 0 0 7.1.1l2-2a5 5 0 0 0-7.1-7.1l-1.2 1.2M14 11a5 5 0 0 0-7.1-.1l-2 2a5 5 0 0 0 7.1 7.1l1.2-1.2",
   tune: "M4 7h16M4 17h16M8 7v0M16 17v0",
   video: "M4 7h11v10H4zM15 10l5-2v8l-5-2z",
@@ -14,7 +15,6 @@ const paths: Record<string, string> = {
   play: "M8 5l12 7-12 7z",
   check: "M5 12l5 5L20 7",
   music: "M9 18V7l10-2v9",
-  playlist: "M4 7h10M4 12h10M4 17h6M16 14l4 3-4 3z",
   warning: "M12 4l9 16H3zM12 10v4M12 17v1",
 };
 
