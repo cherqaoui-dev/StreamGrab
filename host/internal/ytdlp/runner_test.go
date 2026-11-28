@@ -134,3 +134,13 @@ func TestVideoThumbnailArguments(t *testing.T) {
 		}
 	}
 }
+
+func TestDecodeProbeReadsWidth(t *testing.T) {
+	probe, err := decodeProbe([]byte(`{"formats":[{"format_id":"137","width":1080,"height":1920},{"format_id":"140","width":null,"height":null}]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if probe.Formats[0].Width != 1080 || probe.Formats[0].Height != 1920 || probe.Formats[1].Width != 0 {
+		t.Fatalf("formats = %+v", probe.Formats)
+	}
+}

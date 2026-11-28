@@ -293,6 +293,7 @@ func decodeProbe(raw []byte) (media.Probe, error) {
 		AgeLimit   int     `json:"age_limit"`
 		Formats    []struct {
 			FormatID       string  `json:"format_id"`
+			Width          int     `json:"width"`
 			Height         int     `json:"height"`
 			FPS            float64 `json:"fps"`
 			VCodec         string  `json:"vcodec"`
@@ -327,6 +328,7 @@ func decodeProbe(raw []byte) (media.Probe, error) {
 	for _, format := range body.Formats {
 		probe.Formats = append(probe.Formats, media.Format{
 			FormatID:       format.FormatID,
+			Width:          format.Width,
 			Height:         format.Height,
 			FPS:            format.FPS,
 			VCodec:         format.VCodec,

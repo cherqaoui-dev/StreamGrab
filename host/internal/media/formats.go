@@ -27,6 +27,7 @@ var containers = []string{"mp4", "webm", "mkv"}
 
 type Format struct {
 	FormatID       string
+	Width          int
 	Height         int
 	FPS            float64
 	VCodec         string
@@ -356,11 +357,20 @@ func availableRows(rows []Row) []Row {
 	return out
 }
 
+// resolution is the number that names a quality tier, such as 1080. That is the
+// shorter side: a vertical 1080x1920 video is 1080p, like a 1920x1080 one.
+func (f Format) resolution() int {
+	if f.Width > 0 && f.Width < f.Height {
+		return f.Width
+	}
+	return f.Height
+}
+
 func pickVideo(formats []Format, floor, ceiling int, order []string, allow func(Format) bool) *Format {
 	var best *Format
 	for i := range formats {
 		f := &formats[i]
-		if f.HasDRM || !isVideo(*f) || f.Height < floor || f.Height > ceiling {
+		if f.HasDRM || !isVideo(*f) || f.resolution() < floor || f.resolution() > ceiling {
 			continue
 		}
 		if allow != nil && !allow(*f) {
@@ -374,8 +384,8 @@ func pickVideo(formats []Format, floor, ceiling int, order []string, allow func(
 }
 
 func betterVideo(a, b Format, order []string) bool {
-	if a.Height != b.Height {
-		return a.Height > b.Height
+	if a.resolution() != b.resolution() {
+		return a.resolution() > b.resolution()
 	}
 	if a.FPS != b.FPS {
 		return a.FPS > b.FPS

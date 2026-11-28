@@ -142,3 +142,26 @@ func stringsJoin(parts []string) string {
 	}
 	return out
 }
+
+func TestVerticalVideoUsesShorterSide(t *testing.T) {
+	got := Build(Probe{Duration: 30, Formats: []Format{
+		{FormatID: "137", Width: 1080, Height: 1920, FPS: 30, VCodec: "avc1", ACodec: "none", Filesize: 30_000_000},
+		{FormatID: "136", Width: 720, Height: 1280, FPS: 30, VCodec: "avc1", ACodec: "none", Filesize: 15_000_000},
+		{FormatID: "135", Width: 480, Height: 854, FPS: 30, VCodec: "avc1", ACodec: "none", Filesize: 8_000_000},
+		{FormatID: "140", ACodec: "mp4a.40.2", ABR: 128, Filesize: 500_000},
+	}})
+	if len(got.Rows) != 2 {
+		t.Fatalf("rows = %+v", got.Rows)
+	}
+	for i, want := range []struct {
+		height int
+		id     string
+	}{{1080, "137"}, {720, "136"}} {
+		if got.Rows[i].Height != want.height || got.Rows[i].VideoFormatID != want.id {
+			t.Errorf("row %d = %+v, want %+v", i, got.Rows[i], want)
+		}
+	}
+	if got.Chips[0] != "1080p" {
+		t.Errorf("chips = %#v", got.Chips)
+	}
+}

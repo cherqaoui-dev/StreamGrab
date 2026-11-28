@@ -157,6 +157,7 @@ This removes the host program and its browser registration. Downloads, the queue
 | Popup says the companion is not connected | Run `register-host.ps1` (or `install.ps1`) again, then choose *Retry* |
 | Deno shows as not found | Quit the browser completely, including the tray icon, and reopen it |
 | A video can't be read | In Settings, choose *Update now*, and check that Deno is 2.3 or newer |
+| *Bot check* | YouTube is challenging your network. Try again later or from another network. Datacenter and VPN addresses can trigger it. Browser cookies aren't supported |
 | `npm run build` fails with `EBUSY ... rmdir` | Quit the browser and close any window or terminal open inside `extension\.output`. To find the holder, run `resmon`, open *CPU*, and search *Associated Handles* for the folder name |
 | `go` is not recognized | Install Go and open a new terminal. The package script also looks for `%LOCALAPPDATA%\streamgrab-go\go\bin\go.exe` |
 | Windows warns about the host | Expected, because the build is unsigned |

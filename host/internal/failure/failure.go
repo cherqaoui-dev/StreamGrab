@@ -15,6 +15,10 @@ var rules = []struct {
 	signs   []string
 }{
 	{"DRM_PROTECTED", "StreamGrab doesn't support DRM content.", []string{"drm"}},
+	// Must come before the age rule, which also matches "sign in to confirm".
+	// The sign leaves out "you're" because yt-dlp may print a curly apostrophe.
+	{"BOT_CHECK", "YouTube asked to confirm you're not a bot. Try again later or from another network.",
+		[]string{"not a bot"}},
 	{"AGE_RESTRICTED", "This video is age-restricted. Browser cookies are not enabled in this version.",
 		[]string{"confirm your age", "age-restricted", "sign in to confirm"}},
 	{"LIVE_STREAM", "This live stream can't be downloaded in this version.", []string{"live event", "is live"}},
