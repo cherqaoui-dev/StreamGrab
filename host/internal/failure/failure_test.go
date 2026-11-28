@@ -17,6 +17,8 @@ func TestClassify(t *testing.T) {
 		"[download] Destination: Network Error drm.webm\nERROR: Video unavailable":               "EXTRACTION_FAILED",
 		"ERROR: Postprocessing: Conversion failed!":                                              "MUX_FAILED",
 		"ERROR: Sign in to confirm your age":                                                     "AGE_RESTRICTED",
+		"ERROR: [youtube] x: Sign in to confirm you’re not a bot. Use --cookies":                 "BOT_CHECK",
+		"ERROR: [youtube] x: Sign in to confirm you're not a bot":                                "BOT_CHECK",
 	}
 	for text, want := range cases {
 		if got := Classify(text).Code; got != want {

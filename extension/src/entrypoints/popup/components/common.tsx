@@ -20,6 +20,8 @@ export function Skeleton() {
 
 function labelFor(code: string): string {
   switch (code) {
+    case "BOT_CHECK":
+      return "Bot check";
     case "AGE_RESTRICTED":
       return "Age-restricted";
     case "DRM_PROTECTED":
